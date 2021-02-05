@@ -32,6 +32,17 @@ test_that("specialized model data export", {
                                      srcFolder="dsexports")
   expect_equal(nrow(data), 30)
   expect_equal(ncol(data), 16) # omits internal fields
+  expect_identical(sort(names(data)),
+                   c("ActivePredictors", "AppliesToClass", "ConfigurationName", "Group", "Issue",
+                     "ModelID", "Name", "Negatives", "Performance", "Positives",
+                     "RelativeNegatives", "RelativePositives", "RelativeResponseCount",
+                     "ResponseCount", "SnapshotTime", "TotalPredictors"));
+  dataTypes <- as.character(sapply(data[, sort(names(data)), with=F], class))
+  expect_equal(dataTypes,
+               c("integer", "factor", "factor", "factor", "factor",
+                 "factor", "factor", "numeric", "numeric", "numeric",
+                 "numeric", "numeric", "numeric",
+                 "numeric", "c(\"POSIXct\", \"POSIXt\")", "integer"));
 
   data <- readADMDatamartModelExport(instancename="Data-Decision-ADM-ModelSnapshot_All",
                                      srcFolder="dsexports",
@@ -40,11 +51,47 @@ test_that("specialized model data export", {
   expect_equal(ncol(data), 16)
 })
 
+test_that("model export with JSON names", {
+  m1 <- readDSExport(instancename="ADM-ModelSnapshots-withJSON-fromCDHSample.zip",
+                     srcFolder="dsexports")
+  expect_equal(ncol(m1), 24)
+  expect_equal(nrow(m1), 361)
+  expect_setequal(unique(m1$pyName),
+                  c("{\"Proposition\":\"P1\"}","{\"pyName\":\"SuperSaver\",\"pyTreatment\":\"Bundles_WebTreatment\"}","BasicChecking","P10"))
+
+  m2 <- readADMDatamartModelExport(instancename="ADM-ModelSnapshots-withJSON-fromCDHSample.zip",
+                                   srcFolder="dsexports")
+
+  expect_equal(ncol(m2), 20)
+  expect_equal(nrow(m2), 361)
+  expect_true("Treatment" %in% names(m2))
+  expect_true("Proposition" %in% names(m2))
+  expect_setequal(levels(m2$Name),
+                  c('{"Proposition":"P1"}','BasicChecking','P10','SuperSaver'))
+})
+
 test_that("specialized predictor data export", {
   data <- readADMDatamartPredictorExport(instancename="Data-Decision-ADM-PredictorBinningSnapshot_All",
                                          srcFolder="dsexports")
   expect_equal(nrow(data), 15) # binning skipped by default
   expect_equal(ncol(data), 15) # omits internal and binning fields
+  expect_identical(sort(names(data)),
+                   c("BinType", "Contents", "EntryType", "ModelID", "Negatives",
+                     "Performance", "Positives", "PredictorName", "RelativeNegatives", "RelativePositives",
+                     "RelativeResponseCount", "ResponseCount", "SnapshotTime",
+                     "TotalBins", "Type"));
+  dataTypes <- as.character(sapply(data[, sort(names(data)), with=F], class))
+  expect_equal(dataTypes,
+               c("factor", "factor", "factor", "factor", "numeric",
+                 "numeric", "numeric", "factor", "numeric", "numeric",
+                 "numeric", "numeric", "c(\"POSIXct\", \"POSIXt\")",
+                 "integer", "factor"));
+
+  data <- readADMDatamartPredictorExport(instancename="Data-Decision-ADM-PredictorBinningSnapshot_All",
+                                         srcFolder="dsexports",
+                                         latestOnly = F)
+  expect_equal(nrow(data), 425) # no binning but all snapshots
+  expect_equal(ncol(data), 15) # omits internal fields
 
   # compare this to doing it "manually" using the "raw" readDSExport method
   data2 <- readDSExport("Data-Decision-ADM-PredictorBinningSnapshot_All","dsexports")[pyBinIndex == 1]
@@ -52,6 +99,8 @@ test_that("specialized predictor data export", {
   expect_equal(nrow(data2), 425)
   expect_equal(ncol(data2), 35)
   expect_equal(sum(!grepl("^p[x|z]", names(data2))), 30) # w/o the internal fields
+  expect_equal( mean(data$ResponseCount), mean(data2$pyResponseCount) )
+  expect_equal( max(data$Positives), max(as.numeric(data2$pyPositives)) )
 
   data <- readADMDatamartPredictorExport(instancename="Data-Decision-ADM-PredictorBinningSnapshot_All",
                                          srcFolder="dsexports",
@@ -65,52 +114,7 @@ test_that("specialized predictor data export", {
                                          noBinning = F)
   expect_equal(nrow(data), 15) # binning but only latest snapshots
   expect_equal(ncol(data), 30) # omits internal fields
-
-  data <- readADMDatamartPredictorExport(instancename="Data-Decision-ADM-PredictorBinningSnapshot_All",
-                                         srcFolder="dsexports",
-                                         latestOnly = F)
-  expect_equal(nrow(data), 425) # no binning but all snapshots
-  expect_equal(ncol(data), 15) # omits internal fields
 })
-
-# to add/update data:
-
-dontrun_only_to_save_data <- function()
-{
-  admdatamart_models <- readADMDatamartModelExport(instancename="Data-Decision-ADM-ModelSnapshot_All",
-                                                   srcFolder="tests/testthat/dsexports",
-                                                   latestOnly = F)
-  names(admdatamart_models) <- tolower(names(admdatamart_models))
-  #devtools::use_data(admdatamart_models)
-  save(admdatamart_models, file="data/admdatamart_models.rda", compress='xz')
-
-  admdatamart_binning <- readADMDatamartPredictorExport(instancename="Data-Decision-ADM-PredictorBinningSnapshot_All",
-                                                        srcFolder="tests/testthat/dsexports",
-                                                        noBinning = F,
-                                                        latestOnly = F)
-  names(admdatamart_binning) <- tolower(names(admdatamart_binning))
-  #devtools::use_data(admdatamart_binning)
-  save(admdatamart_binning, file="data/admdatamart_binning.rda", compress='xz')
-}
-# admdatamart_models <- readDSExport("Data-Decision-ADM-ModelSnapshot_All", "~/Downloads")
-# names(admdatamart_models) <- tolower(names(admdatamart_models))
-# for(f in c("pyperformance")) admdatamart_models[[f]] <- as.numeric(admdatamart_models[[f]])
-# devtools::use_data(admdatamart_models)
-# save(admdatamart_models, file="data/admdatamart_models.rda", compress='xz')
-#
-# admdatamart_binning <- readDSExport("Data-Decision-ADM-ModelSnapshot_All", "~/Downloads")
-# names(admdatamart_binning) <- tolower(names(admdatamart_binning))
-# for(f in c("pyperformance")) admdatamart_binning[[f]] <- as.numeric(admdatamart_binning[[f]])
-# devtools::use_data(admdatamart_binning)
-# save(admdatamart_binning, file="data/admdatamart_binning.rda", compress='xz')
-# + describe in R/data.R
-
-# ihsampledata taken from IH in DMSample after initialization
-#ihsampledata <- readDSExport("Data-pxStrategyResult_pxInteractionHistory", "~/Downloads")
-#ihsampledata <- ihsampledata[ pyApplication=="DMSample"&pySubjectID %in% paste("CE", seq(1:10), sep="-")]
-#devtools::use_data(ihsampledata)
-#save(ihsampledata, file="data/ihsampledata.rda", compress='xz')
-# + describe in R/data.R
 
 test_that("AUC from binning", {
   expect_equal(auc_from_bincounts( c(3,1,0), c(2,0,1)), 0.75)

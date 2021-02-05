@@ -16,8 +16,8 @@ DATAMART_PREDICTORTABLE <- "pr_data_dm_admmart_pred"
 # Returns a descriptive string representation of the model context for easier debugging
 getDMModelContextAsString <- function(partition)
 {
-  flat <- paste(sapply(names(partition)[order(tolower(names(partition)))],
-                       function(x){return(paste(tolower(x), partition[[x]], sep="_"))}), collapse = "_")
+  flat <- paste(sapply(names(partition)[order(names(partition))],
+                       function(x){return(paste(x, partition[[x]], sep="_"))}), collapse = "_")
   return(flat)
 }
 
@@ -32,19 +32,29 @@ getDMModelContextAsString <- function(partition)
 #' @param appliesToFilter Optional filter on the \code{AppliesTo} class. Can be a list, matching is exact.
 #' @param ruleNameFilter Optional filter on the ADM rule name. Can be a list, matching is exact.
 #' @param applicationFilter Optional filter on the application field. Can be a list, matching is exact.
-#' @param mostRecentOnly Only return results for latest snapshot. Currently this works as a global filter, which is ok
+#' @param latestOnly Only return results for latest snapshot. Currently this works as a global filter, which is ok
 #' because the snapshot agent will also snapshot all models wholesale. If and when that becomes more granular, we may
 #' need to make this more subtle, so take the latest after grouping by pyconfigurationname, pyappliestoclass, pxapplication.
 #' @param verbose Set to \code{TRUE} to show database queries.
 #'
-#' @return A \code{data.table} with the ADM model details. The names are lowercased so processing of the results is not dependent on DB type.
+#' @return A \code{data.table} with the ADM model details. The names are
+#' CamelCased in a standard way so processing of the results is not dependent
+#' on DB type or export tooling.
 #' @export
 #'
 #' @examples
-#' \dontrun{models <- getModelsFromDatamart(conn)}
-#' \dontrun{allModels <- getModelsFromDatamart(conn, mostRecentOnly = F)}
-getModelsFromDatamart <- function(conn, appliesToFilter=NULL, ruleNameFilter=NULL, applicationFilter=NULL, mostRecentOnly=T, verbose=T)
+#' \dontrun{models <- readADMDatamartModelTable(conn)}
+#' \dontrun{allModels <- readADMDatamartModelTable(conn, latestOnly = F)}
+readADMDatamartModelTable <- function(conn, appliesToFilter=NULL, ruleNameFilter=NULL, applicationFilter=NULL, latestOnly = F, verbose=F)
 {
+  # Drop Pega internal fields and model data (if present - not all releases have that)
+  query <- paste("select * from", DATAMART_MODELTABLE, "where false")
+  if(verbose) {
+    print(query)
+  }
+  fields <- names(dbGetQuery(conn, query))
+  fields <- setdiff(fields[!grepl("^p[x|z]", fields)], "pymodeldata")
+
   wheres <- list()
   if(!is.null(appliesToFilter)) {
     wheres[["appliesToFilter"]] <- paste("pyappliestoclass IN (", paste(paste("'",appliesToFilter,"'",sep=""), collapse=","), ")", sep="")
@@ -56,7 +66,7 @@ getModelsFromDatamart <- function(conn, appliesToFilter=NULL, ruleNameFilter=NUL
     wheres[["applicationFilter"]] <- paste("pxapplication IN (", paste(paste("'",applicationFilter,"'",sep=""), collapse=","), ")", sep="")
   }
 
-  if (mostRecentOnly) {
+  if (latestOnly) {
     batchConditions <- paste("pysnapshottime IN (select max(pysnapshottime) from", DATAMART_MODELTABLE, ")")
   } else {
     query <- paste("select pymodelid, count(*) as nsnapshots from", DATAMART_MODELTABLE,
@@ -65,27 +75,30 @@ getModelsFromDatamart <- function(conn, appliesToFilter=NULL, ruleNameFilter=NUL
     if(verbose) {
       print(query)
     }
-    modelidz <- as.data.table(dbGetQuery(conn, query))
-    modelidz[, fetchgroup := as.integer(factor((cumsum(NSNAPSHOTS)) %/% 20000))] # batch up this many unique model snapshots at a time
+    ModelIDz <- as.data.table(dbGetQuery(conn, query))
+    setnames(ModelIDz, toupper(names(ModelIDz)))
+    ModelIDz[, fetchgroup := as.integer(factor((cumsum(NSNAPSHOTS)) %/% 20000))] # batch up this many unique model snapshots at a time
 
-    batchConditions <- sapply(1:max(modelidz$fetchgroup),
-           function(i) {return(paste("pymodelid IN (", paste(paste("'",modelidz[fetchgroup == i]$PYMODELID, "'", sep=""), collapse=","), ")"))})
+    batchConditions <- sapply(1:max(ModelIDz$fetchgroup),
+                              function(i) {return(paste("pymodelid IN (", paste(paste("'",ModelIDz[fetchgroup == i]$PYMODELID, "'", sep=""), collapse=","), ")"))})
   }
 
   allModels <- list()
   for (aBatchCondition in batchConditions) {
     wheres[["batch"]] <- aBatchCondition
-    query <- paste("select * from", DATAMART_MODELTABLE, "where", paste(wheres, collapse = " and "))
+    query <- paste("select", paste(fields, collapse=","), "from", DATAMART_MODELTABLE, "where", paste(wheres, collapse = " and "))
     if(verbose) {
       print(query)
     }
     allModels[[aBatchCondition]] <- as.data.table(dbGetQuery(conn, query))
-    setnames(allModels[[aBatchCondition]], tolower(names(allModels[[aBatchCondition]])))
-    allModels[[aBatchCondition]][, c("pzinskey","pxinsname","pxobjclass","pxcommitdatetime","pxsavedatetime") := NULL] # drop un-interesting columns added by Pega ObjSave mechanics
-    allModels[[aBatchCondition]]$pysnapshottime <- fasttime::fastPOSIXct(allModels[[aBatchCondition]]$pysnapshottime)
   }
 
-  return(rbindlist(allModels))
+  modelz <- rbindlist(allModels)
+
+  modelz <- standardizeDatamartModelData(modelz, latestOnly=latestOnly)
+  modelz <- expandJSONContextInNameField(modelz)
+
+  return(modelz)
 }
 
 #' Retrieves predictor data from the ADM Datamart.
@@ -94,47 +107,61 @@ getModelsFromDatamart <- function(conn, appliesToFilter=NULL, ruleNameFilter=NUL
 #' retrieve all historical data but by default it only retrieves the most recent snapshot data.
 #'
 #' @param conn Connection to the database
-#' @param models List of models as a \code{data.table} typically obtained from a call to \code{getModelsFromDatamart}.
-#' @param mostRecentOnly Only return results for latest snapshot. Currently this works as a global filter, which is ok
+#' @param ModelIDs Optional list of model IDs to select from
+#' @param latestOnly Only return results for latest snapshot. Currently this works as a global filter, which is ok
 #' because the snapshot agent will also snapshot all models wholesale. If and when that becomes more granular, we may
 #' need to make this more subtle, so take the latest after grouping by model ID.
 #' @param verbose Set to \code{TRUE} to show database queries.
 #'
-#' @return A \code{data.table} with the ADM predictor details. The names are lowercased so processing of the results is not dependent on DB type.
+#' @return A \code{data.table} with the ADM predictor details. The names are
+#' CamelCased in a standard way so processing of the results is not dependent
+#' on DB type or export tooling.
 #' @export
 #'
 #' @examples
-#' \dontrun{models <- getModelsFromDatamart(conn)
-#' preds <- getPredictorsForModelsFromDatamart(conn, models)}
-getPredictorsForModelsFromDatamart <- function(conn, models = NULL, mostRecentOnly=T, verbose=T)
+#' \dontrun{models <- readADMDatamartModelTable(conn)
+#' preds <- readADMDatamartPredictorTable(conn, models$ModelID)}
+readADMDatamartPredictorTable <- function(conn, ModelIDs = NULL, latestOnly=T, verbose=T)
 {
+  # Drop Pega internal fields
+  query <- paste("select * from", DATAMART_PREDICTORTABLE, "where false")
+  if(verbose) {
+    print(query)
+  }
+  fields <- names(dbGetQuery(conn, query))
+  fields <- fields[!grepl("^p[x|z]", fields)]
+
+  # TODO implement some sort of batching
+
   wheres <- list()
-  if(!is.null(models)) {
+  if(!is.null(ModelIDs)) {
     wheres[["models"]] <- paste("pymodelid IN (",
-                                paste(paste("'",unique(models$pymodelid),"'",sep=""), collapse = ","),
+                                paste(paste("'",unique(ModelIDs),"'",sep=""), collapse = ","),
                                 ")")
   }
-  if (mostRecentOnly) {
-    wheres[["mostRecentOnly"]] <- paste("pysnapshottime IN (",
-                                        "select max(pysnapshottime) from",
-                                        DATAMART_PREDICTORTABLE)
-    if (!is.null(models)) {
-      wheres[["mostRecentOnly"]] <- paste(wheres[["mostRecentOnly"]],
-                                          "where",
-                                          wheres[["models"]])
+  if (latestOnly) {
+    wheres[["latestOnly"]] <- paste("pysnapshottime IN (",
+                                    "select max(pysnapshottime) from",
+                                    DATAMART_PREDICTORTABLE)
+    if (!is.null(ModelIDs)) {
+      wheres[["latestOnly"]] <- paste(wheres[["latestOnly"]],
+                                      "where",
+                                      wheres[["models"]])
     }
-    wheres[["mostRecentOnly"]] <- paste(wheres[["mostRecentOnly"]], ")", sep="")
+    wheres[["latestOnly"]] <- paste(wheres[["latestOnly"]], ")", sep="")
   }
 
-  query <- paste("select * from", DATAMART_PREDICTORTABLE, "where", paste(wheres, collapse = " and "))
+  query <- paste("select", paste(fields, collapse = ","),
+                 "from", DATAMART_PREDICTORTABLE,
+                 "where", paste(wheres, collapse = " and "))
   if(verbose) {
     print(query)
   }
   predictors <- as.data.table(dbGetQuery(conn, query))
-  setnames(predictors, tolower(names(predictors)))
-  predictors[, c("pzinskey","pxinsname","pxobjclass","pxcommitdatetime","pxsavedatetime") := NULL] # drop un-interesting columns added by Pega ObjSave mechanics
 
-  #lastsnapshots <- predictors[, .SD[which(pysnapshottime == max(pysnapshottime))], by=c("pymodelid")]
+  applyUniformPegaFieldCasing(predictors)
+
+  #lastsnapshots <- predictors[, .SD[which(SnapshotTime == max(SnapshotTime))], by=c("ModelID")]
   return(predictors)
 }
 
@@ -142,39 +169,50 @@ getPredictorsForModelsFromDatamart <- function(conn, models = NULL, mostRecentOn
 # if there are keys outside of the standard set, ADM will have encoded these as JSON strings
 # in pyName - so pyName is checked for being a JSON string and if so, peeled apart and used
 # in combination with any other keys
-getContextKeyValuesFromDatamart <- function(aModel, asLowerCase)
+getContextKeyValuesFromDatamart <- function(aModel, useLowercaseContextKeys=FALSE)
 {
   stdKeys <- c("pyIssue","pyGroup","pyName","pyChannel","pyDirection","pyTreatment")
-  lowercaseKeys <- setdiff(intersect(tolower(stdKeys), tolower(names(aModel))), tolower(names(which(sapply(aModel, is.na))))) # always lowercase
 
+  # If they occur in the model data these will be standardized
+  stdMdlKeys <- c("Issue","Group","Name","Channel","Direction","Treatment")
+
+  # The context keys in use in the model
+  usedKeys <- setdiff(intersect(stdMdlKeys, names(aModel)), names(which(sapply(aModel, is.na))))
+
+  # Peel apart any JSON embedded fields in the Name data
   flexKeys <- list()
-  pyNameIdx <- which(tolower(names(aModel)) == "pyname")
-  if (length(pyNameIdx)==1) {
-    if (startsWith(aModel[[pyNameIdx]], "{")) {
+  nameIdx <- which(names(aModel) == "Name")
+  if (length(nameIdx)==1) {
+    if (startsWith(as.character(aModel[[nameIdx]]), "{")) {
       try (
-        flexKeys <- fromJSON(aModel[[pyNameIdx]]),
+        flexKeys <- fromJSON(aModel[[nameIdx]]),
         silent = T
       )
     }
   }
-
-  # force the keys to become lowercase, this is used for unittesting
-  if (asLowerCase) { names(flexKeys) <- tolower(names(flexKeys)) }
-
   if (length(flexKeys) > 0) {
-    lowercaseKeys <- setdiff(lowercaseKeys, "pyname")
+    usedKeys <- setdiff(usedKeys, "Name")
   }
-  l <- c(flexKeys, lapply(lowercaseKeys, function(x){ return(aModel[[which(tolower(names(aModel))==x)]]) }))
-  names(l) <- c(names(flexKeys), lowercaseKeys)
+
+  l <- c(flexKeys, lapply(usedKeys, function(x){ return(aModel[[which(names(aModel)==x)]]) }))
+  names(l) <- c(names(flexKeys), usedKeys)
+
+  # get the py's back in front, as we're using them to match strategy result data
+  names(l) <- as.character(sapply( names(l), function(x) { return(ifelse(x %in% stdMdlKeys, stdKeys[which(stdMdlKeys==x)], x))}))
+
+  # lower case names used in test framework
+  if (useLowercaseContextKeys) {
+    names(l) <- tolower(names(l))
+  }
 
   return(l)
 }
 
 getPredictorTypeFromDatamart <- function(dmbin)
 {
-  if (dmbin["pyentrytype"]=="Classifier") { return ("CLASSIFIER") }
-  if (dmbin["pytype"]=="numeric") { return ("NUMERIC") }
-  if (dmbin["pytype"]=="symbolic") { return ("SYMBOLIC") }
+  if (dmbin["EntryType"]=="Classifier") { return ("CLASSIFIER") }
+  if (dmbin["Type"]=="numeric") { return ("NUMERIC") }
+  if (dmbin["Type"]=="symbolic") { return ("SYMBOLIC") }
 
   print(dmbin)
   stop("Unknown PredictorType")
@@ -182,125 +220,125 @@ getPredictorTypeFromDatamart <- function(dmbin)
 
 getBinTypeFromDatamart <- function(dmbin)
 {
-  if (dmbin["pyentrytype"]=="Classifier") { return ("INTERVAL") }
-  if (dmbin["pybintype"]=="MISSING") { return ("MISSING") }
-  if (dmbin["pybintype"]=="RESIDUAL") { return ("SYMBOL") } # Treat "Residual" bin like any other symbol
-  if (dmbin["pybintype"]=="EQUIBEHAVIOR" & dmbin["pytype"] == "numeric") { return ("INTERVAL") }
-  if (dmbin["pybintype"]=="EQUIBEHAVIOR" & dmbin["pytype"] == "symbolic" & dmbin["pybinsymbol"] == "Remaining symbols") { return ("REMAININGSYMBOLS") } # dm export doesnt tag remaining symbol group appropriately
-  if (dmbin["pybintype"]=="EQUIBEHAVIOR" & dmbin["pytype"] == "symbolic") { return ("SYMBOL") }
+  if (dmbin["EntryType"]=="Classifier") { return ("INTERVAL") }
+  if (dmbin["BinType"]=="MISSING") { return ("MISSING") }
+  if (dmbin["BinType"]=="RESIDUAL") { return ("SYMBOL") } # Treat "Residual" bin like any other symbol
+  if (dmbin["BinType"]=="EQUIBEHAVIOR" & dmbin["Type"] == "numeric") { return ("INTERVAL") }
+  if (dmbin["BinType"]=="EQUIBEHAVIOR" & dmbin["Type"] == "symbolic" & dmbin["BinSymbol"] == "Remaining symbols") { return ("REMAININGSYMBOLS") } # dm export doesnt tag remaining symbol group appropriately
+  if (dmbin["BinType"]=="EQUIBEHAVIOR" & dmbin["Type"] == "symbolic") { return ("SYMBOL") }
 
   print(dmbin)
   stop("Unknown BinType")
 }
 
 # Santitize the predictor table so it contains a MISSING bin, for symbolics a REMAININGSYMBOLS bin,
-# and add missing information like smoothing factor etc.
+# and add missing information like Smoothing factor etc.
 getPredictorDataFromDatamart <- function(dmbinning, id, overallModelName, tmpFolder=NULL)
 {
-  dmbinning <- dmbinning[which(pysnapshottime == max(pysnapshottime) & (pyentrytype == "Active" | pyentrytype == "Classifier"))]
+  dmbinning <- dmbinning[which(SnapshotTime == max(SnapshotTime) & (EntryType == "Active" | EntryType == "Classifier"))]
 
   # explicit mapping so we can set types as well as do some value mapping
-  binning <- data.table( modelid = dmbinning$pymodelid,
-                         predictorname = dmbinning$pypredictorname,
-                         predictortype = apply(dmbinning, 1, getPredictorTypeFromDatamart),
-                         binlabel = dmbinning$pybinsymbol,
-                         binlowerbound  = as.numeric(dmbinning$pybinlowerbound),
-                         binupperbound = as.numeric(dmbinning$pybinupperbound),
-                         bintype = apply(dmbinning, 1, getBinTypeFromDatamart),
-                         binpos = as.numeric(dmbinning$pybinpositives),
-                         binneg = as.numeric(dmbinning$pybinnegatives),
-                         binidx = as.integer(dmbinning$pybinindex),
-                         totalpos = as.numeric(dmbinning$pypositives),
-                         totalneg = as.numeric(dmbinning$pynegatives),
-                         smoothing = as.numeric(NA),
-                         isactive = T, # NB currently this only lists the active predictors - subset above
-                         performance = as.numeric(dmbinning$pyperformance[dmbinning$pyentrytype=="Classifier"][1])) # performance is of the model, not of the individual predictors
+  binning <- data.table( ModelID = dmbinning$ModelID,
+                         PredictorName = dmbinning$PredictorName,
+                         PredictorType = apply(dmbinning, 1, getPredictorTypeFromDatamart),
+                         BinLabel = dmbinning$BinSymbol,
+                         BinLowerBound  = as.numeric(dmbinning$BinLowerBound),
+                         BinUpperBound = as.numeric(dmbinning$BinUpperBound),
+                         BinType = apply(dmbinning, 1, getBinTypeFromDatamart),
+                         BinPos = as.numeric(dmbinning$BinPositives),
+                         BinNeg = as.numeric(dmbinning$BinNegatives),
+                         BinIndex = as.integer(dmbinning$BinIndex),
+                         TotalPos = as.numeric(dmbinning$Positives),
+                         TotalNeg = as.numeric(dmbinning$Negatives),
+                         Smoothing = as.numeric(NA),
+                         IsActive = T, # NB currently this only lists the active predictors - subset above
+                         Performance = as.numeric(dmbinning$Performance[dmbinning$EntryType=="Classifier"][1])) # Performance is of the model, not of the individual predictors
 
   # Sanitize the representation
 
-  binning[bintype == "MISSING", binlabel := "Missing"] # for consistency
-  binning[bintype == "REMAININGSYMBOLS", binlabel := "Other"] # for consistency
+  binning[BinType == "MISSING", BinLabel := "Missing"] # for consistency
+  binning[BinType == "REMAININGSYMBOLS", BinLabel := "Other"] # for consistency
 
-  # If there are missings, their binidx should start at 0
-  binning[, binidx := binidx - ifelse(any(bintype == "MISSING"), 1L, 0L), by=c("modelid", "predictorname")]
+  # If there are missings, their BinIndex should start at 0
+  binning[, BinIndex := BinIndex - ifelse(any(BinType == "MISSING"), 1L, 0L), by=c("ModelID", "PredictorName")]
 
   # - change num intervals to use NA to indicate inclusiveness of bounds
-  binning[predictortype != "SYMBOLIC" & bintype != "MISSING",
-          c("binlowerbound", "binupperbound") :=
-            list(ifelse(binidx==min(binidx),as.numeric(NA),binlowerbound),
-                 ifelse(binidx==max(binidx),as.numeric(NA),binupperbound)),
-          by=c("modelid", "predictorname")]
+  binning[PredictorType != "SYMBOLIC" & BinType != "MISSING",
+          c("BinLowerBound", "BinUpperBound") :=
+            list(ifelse(BinIndex==min(BinIndex),as.numeric(NA),BinLowerBound),
+                 ifelse(BinIndex==max(BinIndex),as.numeric(NA),BinUpperBound)),
+          by=c("ModelID", "PredictorName")]
 
-  # - add "smoothing" field in the exact same manner that ADM does it (see ISSUE-22141)
+  # - add "Smoothing" field in the exact same manner that ADM does it (see ISSUE-22141)
 
   # legacy behavior (of the previous DM-only version of the PMML converter) - not 100% correct results
-  # binning[predictortype != "CLASSIFIER", smoothing := 1/.N, by=c("modelid", "predictorname")]
+  # binning[PredictorType != "CLASSIFIER", Smoothing := 1/.N, by=c("ModelID", "PredictorName")]
 
   # this seems to be the right way (only count the nr of bins at training time) - which actually might be exactly the same as the above
-  # binning[predictortype != "CLASSIFIER", smoothing := 1/(sum((binpos+binneg) > 0)), by=c("modelid", "predictorname")]
+  # binning[PredictorType != "CLASSIFIER", Smoothing := 1/(sum((BinPos+BinNeg) > 0)), by=c("ModelID", "PredictorName")]
 
   # but this seems to work: ADM apparently always includes the MISSING and symbolic WOS bin. So we do the same here.
-  binning[predictortype != "CLASSIFIER", smoothing := 1/(.N+
+  binning[PredictorType != "CLASSIFIER", Smoothing := 1/(.N+
                                                            # add 1 for missing bin unless that is already present
-                                                           1-as.integer(any(bintype=="MISSING"))+
+                                                           1-as.integer(any(BinType=="MISSING"))+
                                                            # add 1 for symbolic remaining unless already present
-                                                           as.integer(predictortype=="SYMBOLIC")-as.integer(predictortype=="SYMBOLIC" & any(bintype=="REMAININGSYMBOLS"))),
-          by=c("modelid", "predictorname")]
+                                                           as.integer(PredictorType=="SYMBOLIC")-as.integer(PredictorType=="SYMBOLIC" & any(BinType=="REMAININGSYMBOLS"))),
+          by=c("ModelID", "PredictorName")]
 
   # - add MISSING bins when absent
   # - NOTE we set pos/neg to 0 for the newly created bins similar to what ADM does but this is debatable (ISSUE-22143)
-  binningSummary <- binning[predictortype != "CLASSIFIER",
-                            .(nMissing = sum(bintype=="MISSING"),
-                              nRemaining = sum(bintype=="REMAININGSYMBOLS"),
-                              maxBinIdx = max(c(0,binidx), na.rm = T)),
-                            by=c("modelid", "predictorname", "predictortype", "totalpos", "totalneg", "smoothing", "isactive", "performance")]
+  binningSummary <- binning[PredictorType != "CLASSIFIER",
+                            .(nMissing = sum(BinType=="MISSING"),
+                              nRemaining = sum(BinType=="REMAININGSYMBOLS"),
+                              maxBinIndex = max(c(0,BinIndex), na.rm = T)),
+                            by=c("ModelID", "PredictorName", "PredictorType", "TotalPos", "TotalNeg", "Smoothing", "IsActive", "Performance")]
 
   if(any(binningSummary$nMissing < 1)) {
-    defaultsForMissingBin <- data.table( modelid = binning$modelid[1],
-                                         binlabel = "Missing",
-                                         binlowerbound=NA,
-                                         binupperbound=NA,
-                                         bintype="MISSING",
-                                         binpos=0,
-                                         binneg=0,
-                                         binidx=0)
+    defaultsForMissingBin <- data.table( ModelID = binning$ModelID[1],
+                                         BinLabel = "Missing",
+                                         BinLowerBound=NA,
+                                         BinUpperBound=NA,
+                                         BinType="MISSING",
+                                         BinPos=0,
+                                         BinNeg=0,
+                                         BinIndex=0)
     missingMissings <- merge(binningSummary[nMissing==0],
                              defaultsForMissingBin,
-                             all.x=T, by="modelid")[, BINNINGTABLEFIELDS, with=F]
+                             all.x=T, by="ModelID")[, BINNINGTABLEFIELDS, with=F]
   } else {
     missingMissings <- data.table()
   }
 
   # - add WOS/Remaining bin for symbolics when absent
-  if(any(binningSummary$predictortype=="SYMBOLIC" & binningSummary$nRemaining < 1)) {
-    defaultsForRemainingBin <- data.table( modelid = binning$modelid[1],
-                                           binlabel = "Other",
-                                           binlowerbound=NA,
-                                           binupperbound=NA,
-                                           bintype="REMAININGSYMBOLS",
-                                           binpos=0,
-                                           binneg=0,
-                                           binidx=NA)
-    missingRemainings <- merge(binningSummary[predictortype=="SYMBOLIC" & nRemaining==0],
+  if(any(binningSummary$PredictorType=="SYMBOLIC" & binningSummary$nRemaining < 1)) {
+    defaultsForRemainingBin <- data.table( ModelID = binning$ModelID[1],
+                                           BinLabel = "Other",
+                                           BinLowerBound=NA,
+                                           BinUpperBound=NA,
+                                           BinType="REMAININGSYMBOLS",
+                                           BinPos=0,
+                                           BinNeg=0,
+                                           BinIndex=NA)
+    missingRemainings <- merge(binningSummary[PredictorType=="SYMBOLIC" & nRemaining==0],
                                defaultsForRemainingBin,
-                               all.x=T, by="modelid")[, binidx := 1+maxBinIdx][, BINNINGTABLEFIELDS, with=F]
+                               all.x=T, by="ModelID")[, BinIndex := 1+maxBinIndex][, BINNINGTABLEFIELDS, with=F]
   } else {
     missingRemainings <- data.table()
   }
 
   # - split symbolic bins that seem to contain multiple symbols
   binning[, tmpNrSymbols:=1]
-  binning[predictortype=="SYMBOLIC", tmpNrSymbols:=pmax(1,sapply(strsplit(binlabel,",",fixed=T), length))]
+  binning[PredictorType=="SYMBOLIC", tmpNrSymbols:=pmax(1,sapply(strsplit(BinLabel,",",fixed=T), length))]
   binning[, tmpOriRowNo:=seq_len(.N)]
   binning <- binning[rep(tmpOriRowNo,tmpNrSymbols)]
-  binning[tmpNrSymbols>1, tmpSymbolIdx:=seq_len(.N), by=tmpOriRowNo] # so num is the binlabel really and repidx the idx in the string parse
-  binning[tmpNrSymbols>1, binlabel:=sapply(unlist(strsplit(binlabel, ",")),trimws) [tmpSymbolIdx], by=tmpOriRowNo]
+  binning[tmpNrSymbols>1, tmpSymbolIdx:=seq_len(.N), by=tmpOriRowNo] # so num is the BinLabel really and repidx the idx in the string parse
+  binning[tmpNrSymbols>1, BinLabel:=sapply(unlist(strsplit(BinLabel, ",")),trimws) [tmpSymbolIdx], by=tmpOriRowNo]
 
   # - Combine all the newly added tables and make sure the order is set appropriately
   predBinningTable <- rbindlist(list(binning,missingMissings,missingRemainings), use.names = T, fill = T)[,BINNINGTABLEFIELDS,with=F]
-  predBinningTable[predictortype %in% c("CLASSIFIER", "NUMERIC"), binlabel := NA] # binlabel not relevant for numerics or classifier
-  predBinningTable$bintype <- factor(predBinningTable$bintype, levels=BINTYPES)
-  setorder(predBinningTable, predictorname, bintype, binupperbound, binlabel, na.last = T)
+  predBinningTable[PredictorType %in% c("CLASSIFIER", "NUMERIC"), BinLabel := NA] # BinLabel not relevant for numerics or classifier
+  predBinningTable$BinType <- factor(predBinningTable$BinType, levels=BINTYPES)
+  setorder(predBinningTable, PredictorName, BinType, BinUpperBound, BinLabel, na.last = T)
 
   # Dump binning for debugging
   if (!is.null(tmpFolder)) {
@@ -316,27 +354,30 @@ getPredictorDataFromDatamart <- function(dmbinning, id, overallModelName, tmpFol
   return(predBinningTable)
 }
 
-createListFromDatamart <- function(predictorsForPartition, fullName, tmpFolder=NULL, modelsForPartition=NULL, lowerCasePredictors = F)
+createListFromDatamart <- function(predictorsForPartition,
+                                   fullName,
+                                   tmpFolder=NULL,
+                                   modelsForPartition=NULL,
+                                   useLowercaseContextKeys=FALSE)
 {
   predictorsForPartition <- data.table(predictorsForPartition) # just to be sure
-  setnames(predictorsForPartition, tolower(names(predictorsForPartition))) # export has proper case but db access often will not - settle on lowercase
-  if (lowerCasePredictors) {
-    predictorsForPartition[, pypredictorname := tolower(pypredictorname)]
-  }
 
   if (!is.null(modelsForPartition)) {
     modelsForPartition <- as.data.table(modelsForPartition)
-    setnames(modelsForPartition, tolower(names(modelsForPartition)))
-    modelsForPartition <- modelsForPartition[pysnapshottime == max(pysnapshottime),] # max works because the way Pega date strings are represented
 
-    modelsForPartition[["contextAsString"]] <- sapply(modelsForPartition$pymodelid, function(x)
-      { return(getDMModelContextAsString(getContextKeyValuesFromDatamart(modelsForPartition[pymodelid==x,], lowerCasePredictors))) })
+    modelsForPartition <- modelsForPartition[SnapshotTime == max(SnapshotTime),] # max works because the way Pega date strings are represented
 
-    modelList <- lapply(modelsForPartition$pymodelid, function(x){list("binning" = getPredictorDataFromDatamart(predictorsForPartition[pymodelid==x,],
-                                                                                                                modelsForPartition[pymodelid==x,]$contextAsString,
-                                                                                                                fullName, tmpFolder),
-                                                                       "context" = getContextKeyValuesFromDatamart(modelsForPartition[pymodelid==x,], lowerCasePredictors))})
-    names(modelList) <- modelsForPartition$pymodelid
+    modelsForPartition[["contextAsString"]] <- sapply(modelsForPartition$ModelID, function(x)
+    { return(getDMModelContextAsString(getContextKeyValuesFromDatamart(modelsForPartition[ModelID==x,]))) })
+
+    modelList <- lapply(modelsForPartition$ModelID,
+                        function(x){list("binning" = getPredictorDataFromDatamart(predictorsForPartition[ModelID==x,],
+
+                                                                                  modelsForPartition[ModelID==x,]$contextAsString,
+                                                                                  fullName, tmpFolder),
+                                         "context" = getContextKeyValuesFromDatamart(modelsForPartition[ModelID==x,],
+                                                                                     useLowercaseContextKeys=useLowercaseContextKeys))})
+    names(modelList) <- modelsForPartition$ModelID
   } else {
     modelList <- list(list("binning"=getPredictorDataFromDatamart(predictorsForPartition, "allbinning", fullName, tmpFolder)))
     names(modelList) <- fullName

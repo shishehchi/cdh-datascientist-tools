@@ -12,10 +12,113 @@
 
 #' @docType package
 #' @name cdhtools
-#' @import data.table
+#' @import data.table jsonlite
 #' @importFrom rlang is_list
 #' @importFrom utils zip
 NULL
+
+#' Fix field casing
+#'
+#' Uniformly sets the field names for data.tables from DB and dataset export,
+#' capitalizing first letter, fixing common endings.
+#'
+#' @param dt Data table to apply to
+#'
+#' @return The names of the input are modified by reference
+#' @export
+#'
+#' @examples
+#' DT <- data.table::data.table(id = "abc", pyresponsecount = 1234)
+#' applyUniformPegaFieldCasing(DT)
+applyUniformPegaFieldCasing <- function(dt)
+{
+  fields <- names(dt)
+
+  # field name endings we want to see capitalized
+  capitializeEndWords <- c("ID", "Key", "Name", "Count", "Time", "DateTime", "UpdateTime",
+                           "ToClass", "Version", "Predictor", "Predictors", "Rate", "Ratio",
+                           "Negatives", "Positives", "Threshold", "Error", "Importance",
+                           "Type", "Percentage", "Index", "Symbol",
+                           "LowerBound", "UpperBound", "Bins", "GroupIndex",
+                           "ResponseCount", "NegativesPercentage", "PositivesPercentage",
+                           "BinPositives", "BinNegatives", "BinResponseCount", "BinResponseCount",
+                           "ResponseCountPercentage")
+
+  # remove px/py/pz prefixes
+  fields <- gsub(pattern = "^p(x|y|z)", replacement = "", tolower(fields))
+
+  # capitalize word endings
+  for (w in capitializeEndWords) {
+    # exact match at the end
+    fields <- gsub(paste0(w,"$"), w, fields, ignore.case=T)
+  }
+
+  # capitalize first letter
+  fields <- gsub("^(.)", "\\U\\1", fields, perl = T)
+
+  setnames(dt, fields)
+}
+
+# Drop internal fields, fix types and more
+standardizeDatamartModelData <- function(dt, latestOnly)
+{
+  # drop internal fields
+  dt[, names(dt)[grepl("^p[x|z]", names(dt))] := NULL]
+
+  # standardized camel casing of fields
+  applyUniformPegaFieldCasing(dt)
+
+  # filter to only take latest snapshot
+  if (latestOnly) {
+    dt <- dt[, .SD[which.max(SnapshotTime)], by=ModelID]
+  }
+
+  # some fields notoriously returned as char but are numeric
+  dt[, Performance := as.numeric(as.character(Performance))]
+  dt[, Positives := as.numeric(as.character(Positives))]
+  dt[, Negatives := as.numeric(as.character(Negatives))]
+
+  # convert date/time fields if present and not already converted prior
+  if (is.factor(dt$SnapshotTime) || is.character(dt$SnapshotTime)) {
+    dt[, SnapshotTime := fromPRPCDateTime(SnapshotTime)]
+  }
+  if ("FactoryUpdateTime" %in% names(dt)) {
+    if (is.factor(dt$FactoryUpdateTime) || is.character(dt$FactoryUpdateTime)) {
+      dt[, FactoryUpdateTime := fromPRPCDateTime(FactoryUpdateTime)]
+    }
+  }
+
+  return(dt)
+}
+
+# If context of ADM models has been customized, additional context keys will
+# be represented as a JSON string in the pyName field. Here we try to detect
+# that and create proper fields instead of a JSON string.
+expandJSONContextInNameField <- function(dt)
+{
+  mapping <- data.table( OriginalName = levels(dt$Name) )
+  mapping[, isJSON := startsWith(OriginalName, "{") & endsWith(OriginalName, "}")]
+  if (!any(mapping$isJSON)) return(dt)
+
+  jsonFields <- rbindlist(lapply(mapping$OriginalName[mapping$isJSON], jsonlite::fromJSON, flatten=T), fill = T)
+  mapping[(isJSON), names(jsonFields) := jsonFields]
+  rbindlist(lapply(mapping$OriginalName[mapping$isJSON], jsonlite::fromJSON, flatten=T), fill = T)
+  mapping[, isJSON := NULL]
+  for (newName in names(mapping)) {
+    if (is.character(mapping[[newName]])) {
+      mapping[[newName]] <- factor(mapping[[newName]]) # retain as factors
+    }
+  }
+  applyUniformPegaFieldCasing(mapping) # apply uniform naming to new fields as well
+
+  dt <- merge(dt, mapping, by.x="Name", by.y="OriginalName")
+  if ("Name.y" %in% names(dt)) {
+    # use name from JSON strings but only if present there
+    dt[, Name := factor(ifelse(is.na(Name.y), as.character(Name), as.character(Name.y)))]
+    dt[, Name.y := NULL]
+  }
+  return(dt)
+}
 
 #' Read a Pega dataset export file.
 #'
@@ -38,6 +141,7 @@ NULL
 #'   to the lines with JSON data and only those lines for which the function
 #'   returns TRUE will be parsed. This is just for efficiency when reading
 #'   really big files so you can filter early.
+#' @param stringsAsFactors Logical (default is FALSE). Convert all character columns to factors?
 #'
 #' @return A \code{data.table} with the contents
 #' @export
@@ -48,7 +152,7 @@ NULL
 #' \dontrun{readDSExport("Data-Decision-ADM-ModelSnapshot_All_20180316T135038_GMT.zip",
 #' "~/Downloads")}
 #' \dontrun{readDSExport("~/Downloads/Data-Decision-ADM-ModelSnapshot_All_20180316T135038_GMT.zip")}
-readDSExport <- function(instancename, srcFolder=".", tmpFolder=tempdir(check = T), excludeComplexTypes=T, acceptJSONLines=NULL)
+readDSExport <- function(instancename, srcFolder=".", tmpFolder=tempdir(check = T), excludeComplexTypes=T, acceptJSONLines=NULL, stringsAsFactors=F)
 {
   if(endsWith(instancename, ".json")) {
     if (file.exists(instancename)) {
@@ -73,7 +177,7 @@ readDSExport <- function(instancename, srcFolder=".", tmpFolder=tempdir(check = 
       zipFile <- paste(srcFolder,
                        rev(sort(list.files(path=srcFolder, pattern=paste("^", instancename, "_.*\\.zip$", sep=""))))[1],
                        sep="/")
-      if(!file.exists(zipFile)) stop("File not found (looking for most recent file matching instancename in specified folder)")
+      if(!file.exists(zipFile)) stop(paste("File not found (looking for most recent file matching", instancename, "in", srcFolder, ")"))
     }
     jsonFile <- file.path(tmpFolder,"data.json")
     if(file.exists(jsonFile)) file.remove(jsonFile)
@@ -95,7 +199,9 @@ readDSExport <- function(instancename, srcFolder=".", tmpFolder=tempdir(check = 
     from <- (n-1)*chunkSize+1
     to <- min(n*chunkSize, length(multiLineJSON))
     # cat("From", from, "to", to, fill = T)
-    ds <- data.table(jsonlite::fromJSON(paste("[",paste(multiLineJSON[from:to],sep="",collapse = ","),"]")))
+    # TODO is this really faster than reading the lines one by one and
+    # rbindlisting all the many tables?
+    ds <- data.table(jsonlite::fromJSON(paste("[",paste(multiLineJSON[from:to],sep="",collapse = ","),"]")), stringsAsFactors = stringsAsFactors)
     if (excludeComplexTypes) {
       chunkList[[n]] <- ds [, names(ds)[!sapply(ds, rlang::is_list)], with=F]
     } else {
@@ -106,6 +212,8 @@ readDSExport <- function(instancename, srcFolder=".", tmpFolder=tempdir(check = 
 }
 
 # TODO provide similar func for IH data - even only for demo scenarios that strips off internal fields
+
+# TODO BinType probably does not belong in predictor data w/o bins
 
 #' Read export of ADM model data.
 #'
@@ -135,27 +243,30 @@ readADMDatamartModelExport <- function(srcFolder=".",
                                        latestOnly = F,
                                        tmpFolder=tempdir(check = T))
 {
-  modelz <- readDSExport(instancename, srcFolder, tmpFolder=tmpFolder)
-  if ("pyModelData" %in% names(modelz)) { modelz[, pyModelData := NULL] } # older versions don't have this field and perhaps not all future versions will
-  modelz[, names(modelz)[grepl("^p[x|z]", names(modelz))] := NULL]
-  setnames(modelz, gsub(pattern = "^p.", replacement = "", names(modelz)))
-  modelz[, Performance := as.numeric(Performance)] # notoriously returned as char but is numeric
-  modelz[, SnapshotTime := fromPRPCDateTime(SnapshotTime)]
-  if ("FactoryUpdateTime" %in% names(modelz)) { modelz[, FactoryUpdateTime := fromPRPCDateTime(FactoryUpdateTime)] }
-  if (latestOnly) {
-    return(modelz[, .SD[which.max(SnapshotTime)], by=ModelID])
-  } else {
-    return(modelz)
+  if (file.exists(srcFolder) & !dir.exists(srcFolder)) {
+    # if just one argument was passed and it happens to be an existing file, try use that
+    instancename = srcFolder
+    srcFolder = "."
   }
+
+  modelz <- readDSExport(instancename, srcFolder, tmpFolder=tmpFolder, stringsAsFactors=T)
+  if ("pyModelData" %in% names(modelz)) {
+    modelz[,pyModelData := NULL]
+  }
+
+  modelz <- standardizeDatamartModelData(modelz, latestOnly=latestOnly)
+  modelz <- expandJSONContextInNameField(modelz)
+
+  return(modelz)
 }
 
 #' Read export of ADM predictor data.
 #'
 #' This is a specialized version of \code{readDSExport}
 #' that defaults the dataset name, leaves out internal fields and by default omits the
-#' predictor binning data.
-#' other internal fields, returns the properties without the py prefixes and converts
-#' date fields, and makes sure numeric fields are returned as numerics.
+#' predictor binning data. In addition it converts date fields and makes sure
+#' the returned fields have the correct type. All string values are returned
+#' as factors.
 #'
 #' @param srcFolder Optional folder to look for the file (defaults to the
 #'   current folder)
@@ -177,7 +288,7 @@ readADMDatamartModelExport <- function(srcFolder=".",
 #' @examples
 #' \dontrun{readADMDatamartPredictorExport("~/Downloads")}
 readADMDatamartPredictorExport <- function(srcFolder=".",
-                                           instancename = "Data-Decision-ADM-PredictorBinningSnapshot_PredictorBinningSnapshot",
+                                           instancename = "Data-Decision-ADM-PredictorBinningSnapshot_pyADMPredictorSnapshots",
                                            noBinning = T,
                                            latestOnly = T,
                                            tmpFolder=tempdir(check = T))
@@ -189,7 +300,12 @@ readADMDatamartPredictorExport <- function(srcFolder=".",
 
   if (noBinning) {
     predz <- readDSExport(instancename, srcFolder, tmpFolder=tmpFolder,
-                          acceptJSONLines=function(linez) { return(grepl('"pyBinIndex":1,', linez, fixed=T)) })
+                          acceptJSONLines=function(linez) {
+                            # TODO make non fixed and a bit safer, allowing for
+                            # extra spaces and so on
+                            return(grepl('"pyBinIndex":1,', linez, fixed=T))
+                            },
+                          stringsAsFactors=T)
     # just to be very defensive, double check there really are no other bins left
     if (any(predz$pyBinIndex > 1)) {
       predz <- predz[pyBinIndex = 1]
@@ -202,8 +318,11 @@ readADMDatamartPredictorExport <- function(srcFolder=".",
   }
 
   predz[, names(predz)[grepl("^p[x|z]", names(predz))] := NULL]
-  setnames(predz, gsub(pattern = "^p.", replacement = "", names(predz)))
-  predz[, Performance := as.numeric(Performance)] # notoriously returned as char but is numeric
+  applyUniformPegaFieldCasing(predz)
+  predz[, Performance := as.numeric(as.character(Performance))] # some fields notoriously returned as char but are numeric
+  predz[, Positives := as.numeric(as.character(Positives))]
+  predz[, Negatives := as.numeric(as.character(Negatives))]
+
   predz[, SnapshotTime := fromPRPCDateTime(SnapshotTime)]
 
   if (latestOnly) {
@@ -378,6 +497,9 @@ toPRPCDateTime <- function(x)
   return(strftime(x, format="%Y%m%dT%H%M%OS3", tz="GMT", usetz=T))
 }
 
+# TODO below function is tricky and depends on names. It was used in the
+# modelreport.Rmd but possibly also internally.
+
 #' Helper function to return the actual and reported performance of ADM models.
 #'
 #' In the actual performance the actual score range of the model is
@@ -393,14 +515,13 @@ toPRPCDateTime <- function(x)
 getModelPerformanceOverview <- function(dmModels = NULL, dmPredictors = NULL, jsonPartitions = NULL)
 {
   if (!is.null(dmModels) & !is.null(dmPredictors)) {
-    setnames(dmModels, tolower(names(dmModels)))
-    setnames(dmPredictors, tolower(names(dmPredictors)))
-    modelList <- createListFromDatamart(dmPredictors[pymodelid %in% dmModels$pymodelid],
-                                        fullName="Dummy", modelsForPartition=dmModels)
+    modelList <- createListFromDatamart(dmPredictors[ModelID %in% dmModels$ModelID],
+                                        fullName="Dummy",
+                                        modelsForPartition=dmModels)
   } else if (!is.null(dmPredictors) & is.null(dmModels)) {
-    setnames(dmPredictors, tolower(names(dmPredictors)))
+
     modelList <- createListFromDatamart(dmPredictors, fullName="Dummy")
-    modelList[[1]][["context"]] <- list("pyname" =  "Dummy") # should arguably be part of the createList but that breaks some tests, didnt want to bother
+    modelList[[1]][["context"]] <- list("Name" =  "Dummy") # should arguably be part of the createList but that breaks some tests, didnt want to bother
   } else if (!is.null(jsonPartitions)) {
     modelList <- createListFromADMFactory(jsonPartitions, overallModelName="Dummy")
   } else {
@@ -408,59 +529,44 @@ getModelPerformanceOverview <- function(dmModels = NULL, dmPredictors = NULL, js
   }
 
   # Name, response count and reported performance obtained from the data directly. For the score min/max using the utility function
-  # that summarizes the predictor bins into a table ("scaling") with the min and max weight per predictor. These weights are the
+  # that summarizes the predictor bins into a table ("ScaledBins") with the min and max weight per predictor. These weights are the
   # normalized log odds and score min/max is found by adding them up.
-  perfOverview <- data.table( pyname = sapply(modelList, function(m) {return(m$context$pyname)}),
-                              performance = sapply(modelList, function(m) {return(m$binning$performance[1])}),
-                              actual_performance = NA, # placeholder
-                              responses = sapply(modelList, function(m) {return(m$binning$totalpos[1] + m$binning$totalneg[1])}),
-                              score_min = sapply(modelList, function(m) {binz <- copy(m$binning); scaling <- setBinWeights(binz); return(sum(scaling$binning[predictortype != "CLASSIFIER"]$minWeight))}),
-                              score_max = sapply(modelList, function(m) {binz <- copy(m$binning); scaling <- setBinWeights(binz); return(sum(scaling$binning[predictortype != "CLASSIFIER"]$maxWeight))}))
 
-  classifiers <- lapply(modelList, function(m) { return (m$binning[predictortype == "CLASSIFIER"])})
+  perfOverview <- data.table( name = sapply(modelList, function(m) {return(m$context$pyName)}),
+                              reported_performance = sapply(modelList, function(m) {return(m$binning$Performance[1])}),
+                              actual_performance = NA, # placeholder
+                              responses = sapply(modelList, function(m) {return(m$binning$TotalPos[1] + m$binning$TotalNeg[1])}),
+                              score_min = sapply(modelList, function(m) {scaled <- setBinWeights(copy(m$binning)); return(sum(scaled$binning[PredictorType != "CLASSIFIER"]$minWeight))}),
+                              score_max = sapply(modelList, function(m) {scaled <- setBinWeights(copy(m$binning)); return(sum(scaled$binning[PredictorType != "CLASSIFIER"]$maxWeight))}))
+
+
+  classifiers <- lapply(modelList, function(m) { return (m$binning[PredictorType == "CLASSIFIER"])})
 
   findClassifierBin <- function( classifierBins, score )
   {
-    if (nrow(classifierBins) == 1) return(1)
+    if (nrow(classifierBins) == 1) {
+      return(-999)
+    }
 
-    return (1 + findInterval(score, classifierBins$binupperbound[1 : (nrow(classifierBins) - 1)]))
+    return (1 + findInterval(score, classifierBins$BinUpperBound[1 : (nrow(classifierBins) - 1)]))
   }
 
   perfOverview$nbins <- sapply(classifiers, nrow)
-  perfOverview$actual_score_bin_min <- sapply(seq(nrow(perfOverview)), function(n) { return( findClassifierBin( classifiers[[n]], perfOverview$score_min[n]))} )
-  perfOverview$actual_score_bin_max <- sapply(seq(nrow(perfOverview)), function(n) { return( findClassifierBin( classifiers[[n]], perfOverview$score_max[n]))} )
-  perfOverview$actual_performance <- sapply(seq(nrow(perfOverview)), function(n) { return( auc_from_bincounts(classifiers[[n]]$binpos[perfOverview$actual_score_bin_min[n]:perfOverview$actual_score_bin_max[n]],
-                                                                                                              classifiers[[n]]$binneg[perfOverview$actual_score_bin_min[n]:perfOverview$actual_score_bin_max[n]] )) })
-  setorder(perfOverview, pyname)
+  perfOverview$actual_score_bin_min <- sapply(seq(nrow(perfOverview)),
+                                              function(n) { return( findClassifierBin( classifiers[[n]], perfOverview$score_min[n]))} )
+  perfOverview$actual_score_bin_max <- sapply(seq(nrow(perfOverview)),
+                                              function(n) { return( findClassifierBin( classifiers[[n]], perfOverview$score_max[n]))} )
+  perfOverview$actual_performance <- sapply(seq(nrow(perfOverview)),
+                                           function(n) { return( auc_from_bincounts(
+                                             classifiers[[n]]$BinPos[perfOverview$actual_score_bin_min[n]:perfOverview$actual_score_bin_max[n]],
+                                             classifiers[[n]]$BinNeg[perfOverview$actual_score_bin_min[n]:perfOverview$actual_score_bin_max[n]] )) })
+  # print(perfOverview)
+  # print(sapply(perfOverview, class))
+  # print(modelList)
+  # stop("Booh")
+  setorder(perfOverview, name)
+
 
   return(perfOverview)
 }
 
-####
-
-# Internal code to generate the data exports
-createIHexport <- function()
-{
-  # pick up a dump of IH data from Pega
-  ihDump <- readDSExport("../extra/Data-pxStrategyResult_pxInteractionHistory.zip")
-
-  # rescale outcome/decision time to a period of 2 weeks
-  ihDump[, pxOutcomeTime := fromPRPCDateTime(pxOutcomeTime)]
-  ihDump[, pxDecisionTime := fromPRPCDateTime(pxDecisionTime)]
-  minTime <- min(min(ihDump$pxOutcomeTime), min(ihDump$pxDecisionTime))
-  maxTime <- max(max(ihDump$pxOutcomeTime), max(ihDump$pxDecisionTime))
-  oldtimespan <- as.double(difftime(maxTime, minTime, units="secs"))
-  newtimespan <- as.double(lubridate::weeks(2))
-
-  # downsample to reduce the size
-  ihsampledata <- ihDump[sort(sample.int(nrow(ihDump), 50000))]
-
-  ihsampledata[, pxOutcomeTime := toPRPCDateTime(minTime + as.double(difftime(pxOutcomeTime, minTime))*newtimespan/oldtimespan)]
-  ihsampledata[, pxDecisionTime := toPRPCDateTime(minTime + as.double(difftime(pxDecisionTime, minTime))*newtimespan/oldtimespan)]
-
-  # write as data object for easy import
-  save(ihsampledata, file="ihsampledata.rda")
-
-  # re-write as an export zip
-  writeDSExport( ihsampledata, "ihsampledata.zip" )
-}

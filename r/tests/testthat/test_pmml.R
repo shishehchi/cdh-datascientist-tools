@@ -58,18 +58,18 @@ verify_results <- function(pmmlString, pmmlFile, inputFile, outputFile)
 
 compareBinning <- function(predictorName, dmBinning, jsonBinning, dmCSV, jsonCSV)
 {
-  expect_equal(nrow(dmBinning[bintype!="SYMBOL"]), nrow(jsonBinning[bintype!="SYMBOL"]),
+  expect_equal(nrow(dmBinning[BinType!="SYMBOL"]), nrow(jsonBinning[BinType!="SYMBOL"]),
                info=paste("nr of bins of", predictorName, ":",
-                          nrow(dmBinning[bintype!="SYMBOL"]), "[", dmCSV, "]", "vs",
-                          nrow(jsonBinning[bintype!="SYMBOL"]), "[", jsonCSV, "]"))
+                          nrow(dmBinning[BinType!="SYMBOL"]), "[", dmCSV, "]", "vs",
+                          nrow(jsonBinning[BinType!="SYMBOL"]), "[", jsonCSV, "]"))
 
   # this seems to be model performance, not predictor performance
-  expect_equal(unique(dmBinning$performance), unique(jsonBinning$performance), tolerance=1e-6,
-               info=paste("performance",
+  expect_equal(unique(dmBinning$Performance), unique(jsonBinning$Performance), tolerance=1e-6,
+               info=paste("Performance",
                           "[", dmCSV, "]", "vs", "[", jsonCSV, "]"))
 
-  if (nrow(dmBinning[bintype!="SYMBOL"]) == nrow(jsonBinning[bintype!="SYMBOL"])) {
-    flds <- setdiff(names(dmBinning), c("modelid", "performance"))
+  if (nrow(dmBinning[BinType!="SYMBOL"]) == nrow(jsonBinning[BinType!="SYMBOL"])) {
+    flds <- setdiff(names(dmBinning), c("ModelID", "Performance"))
     for (f in flds) {
       if (nrow(dmBinning) == nrow(jsonBinning)) {
         # full comparison
@@ -78,7 +78,7 @@ compareBinning <- function(predictorName, dmBinning, jsonBinning, dmCSV, jsonCSV
                                 "[", dmCSV, "]", "vs", "[", jsonCSV, "]"))
       } else {
         # exclude the SYMBOL matches from the comparison
-        expect_equal(dmBinning[bintype!="SYMBOL"][[f]], jsonBinning[bintype!="SYMBOL"][[f]], tolerance=1e-6,
+        expect_equal(dmBinning[BinType!="SYMBOL"][[f]], jsonBinning[BinType!="SYMBOL"][[f]], tolerance=1e-6,
                      info=paste("comparing (except SYMBOL matches)", f, "bins of",predictorName,
                                 "[", dmCSV, "]", "vs", "[", jsonCSV, "]"))
       }
@@ -96,23 +96,24 @@ compareCSV <- function(dmCSV, jsonCSV)
                               "[", dmCSV, "]", "vs", names(json), "[", jsonCSV, "]"))
 
   if (identical(names(dm), names(json))) {
-    dmPreds <- sort(unique(dm$predictorname))
-    jsonPreds <- sort(unique(dm$predictorname))
+    dmPreds <- sort(unique(dm$PredictorName))
+    jsonPreds <- sort(unique(dm$PredictorName))
 
     expect_identical(dmPreds, jsonPreds,
                      info=paste("predictor names not the same", names(dm), "[", dmCSV, "]", "vs", names(json), "[", jsonCSV, "]"))
 
-    # exclude when predictortype = "SYMBOLIC" as the factory representation contains all symbols
+    # exclude when PredictorType = "SYMBOLIC" as the factory representation contains all symbols
     # while this is truncated in the DM - this may not be a problem per se, if so then propensities will show this
 
-    expect_identical(nrow(dm[predictortype!="SYMBOLIC"]), nrow(json[predictortype!="SYMBOLIC"]),
+    expect_identical(nrow(dm[PredictorType!="SYMBOLIC"]), nrow(json[PredictorType!="SYMBOLIC"]),
                      info=paste("total number of bins for all non-symbolic predictors not the same",
-                                nrow(dm[predictortype!="SYMBOLIC"]), "[", dmCSV, "]", "vs",
-                                nrow(json[predictortype!="SYMBOLIC"]), "[", jsonCSV, "]"))
+                                nrow(dm[PredictorType!="SYMBOLIC"]), "[", dmCSV, "]", "vs",
+                                nrow(json[PredictorType!="SYMBOLIC"]), "[", jsonCSV, "]"))
 
     if (identical(dmPreds, jsonPreds)) {
-      for (p in c(setdiff(dmPreds,"classifier"), intersect(dmPreds, "classifier"))) { # list classifier last
-        compareBinning(p, dm[predictorname==p], json[predictorname==p], dmCSV, jsonCSV)
+      for (p in c(setdiff(dmPreds,"Classifier"),
+                  intersect(dmPreds, "Classifier"))) { # list classifier last
+        compareBinning(p, dm[PredictorName==p], json[PredictorName==p], dmCSV, jsonCSV)
       }
     }
   }
@@ -120,6 +121,7 @@ compareCSV <- function(dmCSV, jsonCSV)
 
 # Runs a full unit test by generating PMML from the model and predictor data,
 # scoring that with JPMML against provided inputs and comparing the results against expected values.
+
 pmml_unittest <- function(testName)
 {
   testFolder <- "d"
@@ -149,7 +151,8 @@ pmml_unittest <- function(testName)
     jsonFiles <- list.files(path = jsonFolder, pattern = "^.*\\.json", full.names = T)
     partitions <- data.table(pymodelpartitionid = sub("^.*json[^.]*\\.(.*)\\.json", "\\1", jsonFiles),
                              pyfactory = sapply(jsonFiles, readr::read_file))
-    modelList <- createListFromADMFactory(partitions, testName, tmpFolder, forceLowerCasePredictorNames = T)
+    modelList <- createListFromADMFactory(partitions, testName, tmpFolder,
+                                          forceLowerCasePredictorNames=T)
 
     pmml <- createPMML(modelList, testName)
 
@@ -163,11 +166,17 @@ pmml_unittest <- function(testName)
     cat("   Datamart predictor data:", predictorDataFile, fill=T)
 
     predictorData <- fread(predictorDataFile)
+    applyUniformPegaFieldCasing(predictorData)
+
+    # forcing lowercase predictornames here
+    predictorData[, PredictorName := tolower(PredictorName)]
+
     if (file.exists(modelDataFile)) {
-      modelData <- read.csv(modelDataFile, stringsAsFactors = F) # fread adds extra double-quotes for JSON strings, thus using simple read.csv
-      modelList <- createListFromDatamart(predictorData, testName, tmpFolder, modelData, lowerCasePredictors = T)
+      modelData <- data.table(read.csv(modelDataFile, stringsAsFactors = F)) # fread adds extra double-quotes for JSON strings, thus using simple read.csv
+      applyUniformPegaFieldCasing(modelData)
+      modelList <- createListFromDatamart(predictorData, testName, tmpFolder, modelData, useLowercaseContextKeys=TRUE)
     } else {
-      modelList <- createListFromDatamart(predictorData, testName, tmpFolder, lowerCasePredictors = T)
+      modelList <- createListFromDatamart(predictorData, testName, tmpFolder, useLowercaseContextKeys=TRUE)
     }
 
     pmml <- createPMML(modelList, testName)
@@ -200,7 +209,8 @@ pmml_unittest <- function(testName)
       dmBinningFiles <- sort(dmBinningFiles)
       jsonBinningFiles <- sort(jsonBinningFiles)
       for (i in seq(length(dmBinningFiles))) {
-        compareCSV(dmBinningFiles[i], jsonBinningFiles[i]) # assume the files are named so their alphabetical order is the same
+        compareCSV(dmBinningFiles[i],
+                   jsonBinningFiles[i]) # assume the files are named so their alphabetical order is the same
       }
     }
   }
@@ -230,44 +240,67 @@ test_that("Test running the JPMML engine with a simple model", {
   expect_equal(nrow(scores), 150)
 })
 
-test_that("a basic happy-path test with a single 2-predictor model w/o missings, WOS etc", {
-  pmml_unittest("deeperdive")
+test_that("Public functions from JSON utils", {
+  context("Public JSON PMML utility functions")
+
+  expect_equal(getJSONModelContextAsString("{\"partition\":{\"pyIssue\":\"Sales\", \"pyGroup\":\"Cards\"}}"),
+               "pygroup_Cards_pyissue_Sales")
+
+  # TODO: perhaps exercise the peeling of JSON from pyName here as well
 })
-test_that("a basic model consisting of 2 models, also providing new partition key values", {
+
+# PMML Tests with ADM Datamart data
+
+test_that("Simple ADM model with 2 actions, also providing new partition key values", {
   pmml_unittest("simplemultimodel")
 })
+
 test_that("check symbolic binning with WOS", {
   pmml_unittest("multimodel_wos")
 })
+
 test_that("checks flexible context keys (wich require to parse the JSON inside the pyName field), also some invalid models with empty keys", {
   pmml_unittest("flexandinvalidkeys")
 })
+
 test_that("highlights an issue with the way ADM defines the smoothing factor in the score calculation - one of the tests in this will be failing if defining the smoothing factor in a naive way", {
   pmml_unittest("smoothfactorissue") # previously called "precisionissue"
 })
+
 test_that("Use of a predictor with a RESIDUAL bin", {
   pmml_unittest("residualtest")
 })
+
 test_that("Missing input values", {
   # NB example-1.4-SNAPSHOT.jar reads the CSV slightly different than previously,
   # now need explicit NA to indicate missing value
   pmml_unittest("missingvalues")
 })
+
 test_that("Models with different evidence for predictors (added/removed)", {
   pmml_unittest("unequalevidence")
 })
+
 test_that("Issue with creating PMML from internal JSON", {
   pmml_unittest("issue-4-singlebinpredictor")
 })
-test_that("Issue with a single classifier bin", {
-  pmml_unittest("singleclassifierbin")
-})
+
+# Tests using JSON factory data
+
 test_that("Test the test generator", {
   pmml_unittest("testfw")
 })
 
-# Verify that reason codes get (or don't get) generated in various flavours
-# TODO add args to adm2pmml to set # of reason codes and direction
+test_that("Simple but deeper dive", {
+  pmml_unittest("deeperdive")
+})
+
+test_that("Issue with a single classifier bin", {
+  pmml_unittest("singleclassifierbin")
+})
+
+# Reason codes
+
 test_that("Scorecard reason codes", {
   context("Scorecard reason codes")
 
@@ -287,6 +320,7 @@ test_that("Scorecard reason codes", {
   pmmlFiles <- adm2pmml(dmModels = dummyModelData,
                         dmPredictors = predData,
                         destDir = tmpFolder)
+
   expect_equal(length(pmmlFiles), 1)
 
   # Run with inputs. The inputs include the same 3 cases that are detailed in the deeper dive Excel sheet
@@ -324,33 +358,6 @@ test_that("Scorecard reason codes", {
   # relative to the baseline score of each Characteristic, or as set at the top-level scorecard.
 })
 
-test_that("Public functions from JSON utils", {
-  context("Public JSON PMML utility functions")
-
-  expect_equal(getJSONModelContextAsString("{\"partition\":{\"pyIssue\":\"Sales\", \"pyGroup\":\"Cards\"}}"),
-               "pygroup_Cards_pyissue_Sales")
-})
-
-test_that("PMML generation from DM exports", {
-  context("PMML from Datamart Exports")
-
-  allModels <- readDSExport("Data-Decision-ADM-ModelSnapshot_All","dsexports")
-  allPredictors <- readDSExport("Data-Decision-ADM-PredictorBinningSnapshot_All","dsexports")
-
-  pmmlFiles <- adm2pmml(allModels, allPredictors)
-
-  expect_equal(length(pmmlFiles), 3)
-  expect_equal(names(pmmlFiles)[1], "./BannerModel.pmml")
-  expect_equal(names(pmmlFiles)[2], "./SalesModel.pmml")
-  expect_equal(names(pmmlFiles)[3], "./VerySimpleSalesModel.pmml")
-  expect_equal(length(pmmlFiles[[1]]), 5)
-  expect_equal(length(pmmlFiles[[2]]), 5)
-  expect_equal(length(pmmlFiles[[3]]), 5)
-
-  expect_equal(length(adm2pmml(allModels, allPredictors, ruleNameFilter="^(?!VerySimple).*$", appliesToFilter="PMDSM")), 2)
-  expect_equal(length(adm2pmml(allModels, allPredictors, appliesToFilter="DMSample")), 0)
-})
-
 test_that("Creating a Scorecard from the captured scoring model", {
   testFolder <- "d"
 
@@ -385,3 +392,28 @@ test_that("Creating a Scorecard from the captured scoring model", {
 
 
 })
+
+# Check user facing wrapper function
+
+test_that("Wrapper function using DM exports", {
+  context("Wrapper function adm2pmml")
+
+  allModels <- readDSExport("Data-Decision-ADM-ModelSnapshot_All","dsexports")
+  allPredictors <- readDSExport("Data-Decision-ADM-PredictorBinningSnapshot_All","dsexports")
+
+  pmmlFiles <- adm2pmml(allModels, allPredictors)
+
+  expect_equal(length(pmmlFiles), 3)
+  expect_equal(names(pmmlFiles)[1], "./BannerModel.pmml")
+  expect_equal(names(pmmlFiles)[2], "./SalesModel.pmml")
+  expect_equal(names(pmmlFiles)[3], "./VerySimpleSalesModel.pmml")
+  expect_equal(length(pmmlFiles[[1]]), 5)
+  expect_equal(length(pmmlFiles[[2]]), 5)
+  expect_equal(length(pmmlFiles[[3]]), 5)
+
+  expect_equal(length(adm2pmml(allModels, allPredictors, ruleNameFilter="^(?!VerySimple).*$", appliesToFilter="PMDSM")), 2)
+  expect_equal(length(adm2pmml(allModels, allPredictors, appliesToFilter="DMSample")), 0)
+})
+
+
+
