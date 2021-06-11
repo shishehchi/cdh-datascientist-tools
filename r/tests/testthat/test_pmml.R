@@ -151,7 +151,7 @@ pmml_unittest <- function(testName)
     jsonFiles <- list.files(path = jsonFolder, pattern = "^.*\\.json", full.names = T)
     partitions <- data.table(pymodelpartitionid = sub("^.*json[^.]*\\.(.*)\\.json", "\\1", jsonFiles),
                              pyfactory = sapply(jsonFiles, readr::read_file))
-    modelList <- createListFromADMFactory(partitions, testName, tmpFolder,
+    modelList <- normalizedBinningFromADMFactory(partitions, testName, tmpFolder,
                                           forceLowerCasePredictorNames=T)
 
     pmml <- createPMML(modelList, testName)
@@ -174,9 +174,9 @@ pmml_unittest <- function(testName)
     if (file.exists(modelDataFile)) {
       modelData <- data.table(read.csv(modelDataFile, stringsAsFactors = F)) # fread adds extra double-quotes for JSON strings, thus using simple read.csv
       applyUniformPegaFieldCasing(modelData)
-      modelList <- createListFromDatamart(predictorData, testName, tmpFolder, modelData, useLowercaseContextKeys=TRUE)
+      modelList <- normalizedBinningFromDatamart(predictorData, testName, tmpFolder, modelData, useLowercaseContextKeys=TRUE)
     } else {
-      modelList <- createListFromDatamart(predictorData, testName, tmpFolder, useLowercaseContextKeys=TRUE)
+      modelList <- normalizedBinningFromDatamart(predictorData, testName, tmpFolder, useLowercaseContextKeys=TRUE)
     }
 
     pmml <- createPMML(modelList, testName)
@@ -356,41 +356,6 @@ test_that("Scorecard reason codes", {
 
   # reasonCodeAlgorithm: May be "pointsAbove" or "pointsBelow", describing how reason codes shall be ranked,
   # relative to the baseline score of each Characteristic, or as set at the top-level scorecard.
-})
-
-test_that("Creating a Scorecard from the captured scoring model", {
-  testFolder <- "d"
-
-  # for testing in console
-  # testFolder<-"tests/testthat/d"
-
-  encodedModelData <- paste(readLines(file.path(testFolder, "scoringmodeldata.json")), collapse="\n")
-
-  sc <- getScoringModelFromJSONFactoryString(encodedModelData, isAuditModel=T)
-
-  expect_equal(ncol(sc$scorecard), 5)
-  expect_equal(ncol(sc$mapping), 4)
-  expect_equal(ncol(sc$binning), 9)
-  expect_equal(nrow(sc$scorecard), 92)
-  expect_equal(nrow(sc$mapping), 22)
-  expect_equal(nrow(sc$binning), 114)
-
-  expect_equal(nrow(getScoringModelFromJSONFactoryString(encodedModelData)$mapping), 22)
-  expect_equal(nrow(getScoringModelFromJSONFactoryString(encodedModelData)$scorecard), 0) # no info about active or not, all considered inactive
-  expect_equal(nrow(getScoringModelFromJSONFactoryString(encodedModelData)$binning), 22)
-
-  # TODO run scorecard on returned binning for a single case
-  score <- function(scorecard, inputs) # candidate for cdh_utils
-  {
-    totalscore <- 0.5
-
-    return(totalscore)
-  }
-
-  # TODO verify against real ADM model (test panel)
-  xxx <- score(sc$binning, list(Age = 40, Income = 10000, OverallUsage = 0) )
-
-
 })
 
 # Check user facing wrapper function

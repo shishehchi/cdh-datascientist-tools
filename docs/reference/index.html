@@ -103,7 +103,13 @@
       <a href="../articles/adm-explained.html">adm-explained</a>
     </li>
     <li>
+      <a href="../articles/historical-dataset.html">historical-dataset</a>
+    </li>
+    <li>
       <a href="../articles/ih-reporting.html">ih-reporting</a>
+    </li>
+    <li>
+      <a href="../articles/snapshots-to-scorecards.html">snapshots-to-scorecards</a>
     </li>
   </ul>
 </li>
@@ -158,6 +164,12 @@
           <p><code><a href="admJSONFactoryToBinning.html">admJSONFactoryToBinning()</a></code> </p>
         </td>
         <td><p>Turns an ADM Factory JSON into an easy-to-process binning table.</p></td>
+      </tr><tr>
+        
+        <td>
+          <p><code><a href="admVarImp.html">admVarImp()</a></code> </p>
+        </td>
+        <td><p>Calculate variable importance from ADM Datamart data.</p></td>
       </tr><tr>
         
         <td>
@@ -227,10 +239,23 @@
       </tr><tr>
         
         <td>
+          <p><code><a href="getScorecardFromSnapshot.html">getScorecardFromSnapshot()</a></code> </p>
+        </td>
+        <td><p>Convert a model snapshot into a human-readable as well as machine-executable
+PMML Scorecard.</p></td>
+      </tr><tr>
+        
+        <td>
           <p><code><a href="getScoringModelFromJSONFactoryString.html">getScoringModelFromJSONFactoryString()</a></code> </p>
         </td>
-        <td><p>Build a scoring model from the "analyzedData" JSON string that is part of the
-JSON Factory.</p></td>
+        <td><p>Create a human-readable as well as machine-executable Scorecard from the JSON
+of a specific model.</p></td>
+      </tr><tr>
+        
+        <td>
+          <p><code><a href="hds.html">hds</a></code> </p>
+        </td>
+        <td><p>A sample export of a Historical Dataset to illustrate how to import and analyze this.</p></td>
       </tr><tr>
         
         <td>
@@ -240,9 +265,87 @@ JSON Factory.</p></td>
       </tr><tr>
         
         <td>
+          <p><code><a href="latestSnapshotsOnly.html">latestSnapshotsOnly()</a></code> </p>
+        </td>
+        <td><p>Subset the provided datamart data to just the latest snapshot per model.</p></td>
+      </tr><tr>
+        
+        <td>
           <p><code><a href="lift.html">lift()</a></code> </p>
         </td>
         <td><p>Calculates lift from counts of positives and negatives.</p></td>
+      </tr><tr>
+        
+        <td>
+          <p><code><a href="plotADMBinning.html">plotADMBinning()</a></code> </p>
+        </td>
+        <td><p>Create binning plot for any predictor.</p></td>
+      </tr><tr>
+        
+        <td>
+          <p><code><a href="plotADMCumulativeGains.html">plotADMCumulativeGains()</a></code> </p>
+        </td>
+        <td><p>Create cum gains plot for the model classifier.</p></td>
+      </tr><tr>
+        
+        <td>
+          <p><code><a href="plotADMCumulativeLift.html">plotADMCumulativeLift()</a></code> </p>
+        </td>
+        <td><p>Create cum lift plot for the model classifier.</p></td>
+      </tr><tr>
+        
+        <td>
+          <p><code><a href="plotADMModelPerformanceOverTime.html">plotADMModelPerformanceOverTime()</a></code> </p>
+        </td>
+        <td><p>Plot ADM Model Performance over time</p></td>
+      </tr><tr>
+        
+        <td>
+          <p><code><a href="plotADMModelSuccessRateOverTime.html">plotADMModelSuccessRateOverTime()</a></code> </p>
+        </td>
+        <td><p>Plot ADM Model Success Rate over time</p></td>
+      </tr><tr>
+        
+        <td>
+          <p><code><a href="plotADMPerformanceSuccessRateBoxPlot.html">plotADMPerformanceSuccessRateBoxPlot()</a></code> </p>
+        </td>
+        <td><p>Create box plot of performance x success rate from ADM datamart model data.</p></td>
+      </tr><tr>
+        
+        <td>
+          <p><code><a href="plotADMPerformanceSuccessRateBubbleChart.html">plotADMPerformanceSuccessRateBubbleChart()</a></code> </p>
+        </td>
+        <td><p>Create bubble chart from ADM datamart model data.</p></td>
+      </tr><tr>
+        
+        <td>
+          <p><code><a href="plotADMPredictorPerformance.html">plotADMPredictorPerformance()</a></code> </p>
+        </td>
+        <td><p>Create boxplots per predictor with performance range in models.</p></td>
+      </tr><tr>
+        
+        <td>
+          <p><code><a href="plotADMPredictorPerformanceMatrix.html">plotADMPredictorPerformanceMatrix()</a></code> </p>
+        </td>
+        <td><p>Performance of predictors per proposition</p></td>
+      </tr><tr>
+        
+        <td>
+          <p><code><a href="plotADMPropositionSuccessRates.html">plotADMPropositionSuccessRates()</a></code> </p>
+        </td>
+        <td><p>Plot ADM Proposition Success Rates</p></td>
+      </tr><tr>
+        
+        <td>
+          <p><code><a href="plotADMVarImp.html">plotADMVarImp()</a></code> </p>
+        </td>
+        <td><p>A plot from the ADM variable importance data.</p></td>
+      </tr><tr>
+        
+        <td>
+          <p><code><a href="printADMPredictorInfo.html">printADMPredictorInfo()</a></code> </p>
+        </td>
+        <td><p>HTML snippet with predictor info.</p></td>
       </tr><tr>
         
         <td>
@@ -276,9 +379,21 @@ JSON Factory.</p></td>
       </tr><tr>
         
         <td>
+          <p><code><a href="readDatamartFromFile.html">readDatamartFromFile()</a></code> </p>
+        </td>
+        <td><p>Generic datamart reader.</p></td>
+      </tr><tr>
+        
+        <td>
           <p><code><a href="toPRPCDateTime.html">toPRPCDateTime()</a></code> </p>
         </td>
         <td><p>Convert to a Pega date-time string.</p></td>
+      </tr><tr>
+        
+        <td>
+          <p><code><a href="userFriendlyADMBinning.html">userFriendlyADMBinning()</a></code> </p>
+        </td>
+        <td><p>Creates user friendly table with binning info.</p></td>
       </tr><tr>
         
         <td>

@@ -159,7 +159,7 @@ getSymBinningFromJSON <- function(symField, id)
               Smoothing = symField$laplaceSmoothingValue)
 }
 
-internalBinningFromJSONFactory <- function(binningJSON, id, activePredsOnly)
+normalizedBinningFromJSONFactory <- function(binningJSON, id, activePredsOnly)
 {
   # assuming first of each active group is the active predictor
   activePreds <- list()
@@ -220,23 +220,34 @@ internalBinningFromJSONFactory <- function(binningJSON, id, activePredsOnly)
   return(predBinningTable)
 }
 
-#' Build a scoring model from the "analyzedData" JSON string that is part of the
-#' JSON Factory.
+# TODO: figure out how this works for AB models and take versioning into
+# account. For AB models perhaps only the (hyper)parameters?
+
+#' Create a human-readable as well as machine-executable Scorecard from the JSON
+#' of a specific model.
+#'
+#' This works off the "analyzedData" JSON string from the JSON factory.
 #'
 #' This part of the ADM Factory string is the only piece that is necessary for
 #' scoring. The scoring model itself is currently just a binning table in
 #' internal format. We should see if this needs to be augmented to make it more
 #' of a score card.
 #'
-#' @param analyzedData The JSON string with the analyzed (scoring) portion of
-#'   the ADM Factory JSON.
-#' @param isAuditModel When \code{True} the data comes from the
-#'   full-auditability blob in the datamart and only contains active predictors.
-#'   When \code{False} then it will filter the data for only active predictors.
+#' @param modelJSON The JSON string with the analyzed (scoring) portion of the
+#'   ADM Factory JSON.
+#' @param name Optional name to be used in the generated PMML. Will be used in
+#'   the header of the PMML.
+#' @param isAuditModel When \code{True} (default) the data comes from the
+#'   full-auditability blob in the datamart which only contains active
+#'   predictors. When \code{False} then it will filter the data for active
+#'   predictors.
 #'
-#' @return A \code{data.table} with the binning.
+#' @return A 4-element \code{list} with the human-readable scorecard in
+#'   $scorecard as a \code{data.table}, a human-readable mapping of the score to
+#'   a propensity in $mapping, also as a \code{data.table}, an executable PMML
+#'   in $pmml in the form of a string and additional the full internal binning.
 #' @export
-getScoringModelFromJSONFactoryString <- function(analyzedData, isAuditModel=F)
+getScoringModelFromJSONFactoryString <- function(modelJSON, name="", isAuditModel=T)
 {
   buildLabel <- function(PredictorType, BinType, BinLabel, BinLowerBound, BinUpperBound)
   {
@@ -246,15 +257,18 @@ getScoringModelFromJSONFactoryString <- function(analyzedData, isAuditModel=F)
                                 ifelse(BinType == "REMAININGSYMBOLS", "Other", paste("Internal error: unknown type", BinType))))))
   }
 
-  scoringModelJSON <- fromJSON(analyzedData)
+  scoringModelJSON <- fromJSON(modelJSON)
   id <- getJSONModelContextAsString(toJSON(scoringModelJSON$factoryKey$modelPartition))
 
-  internalBinning <- internalBinningFromJSONFactory(scoringModelJSON, id, activePredsOnly=!isAuditModel)
+  internalBinning <- normalizedBinningFromJSONFactory(scoringModelJSON, id, activePredsOnly=!isAuditModel)
+
+  # Executable PMML scorecard
+  pmml <- createPMML(list(list(context = NULL, binning = internalBinning)), name)
 
   # the internal binning is not a scorecard yet so relabel some of the columns and split
   # into scorecard and a score mapping
 
-  scaledBinning <- setBinWeights(internalBinning)$binning
+  scaledBinning <- getNBFormulaWeights(internalBinning)$binning
   scaledBinning[, Label := buildLabel(PredictorType, BinType, BinLabel, BinLowerBound, BinUpperBound)]
 
   # The field to score mapping (also returning pos/neg so numbers can be verified)
@@ -271,10 +285,60 @@ getScoringModelFromJSONFactoryString <- function(analyzedData, isAuditModel=F)
   oriBinning <- scaledBinning[, c("PredictorName", "PredictorType", "BinType", "BinLabel", "BinLowerBound", "BinUpperBound", "BinWeight", "BinPos", "BinNeg")]
   setnames(oriBinning, c("Field", "FieldType", "BinType", "Symbol", "LowerBound", "UpperBound", "Weight", "pos", "neg"))
 
-  return(list(scorecard = scorecard, mapping = scorecardMapping, binning = oriBinning))
+
+  return(list(scorecard = scorecard, mapping = scorecardMapping, binning = oriBinning, pmml = toString(pmml)))
 }
 
-createListFromSingleJSONFactoryString <- function(aFactory, id, overallModelName, tmpFolder=NULL, forceLowerCasePredictorNames=F, activePredsOnly=T)
+#' Convert a model snapshot into a human-readable as well as machine-executable
+#' PMML Scorecard.
+#'
+#' This works off the model snapshot data stored in the \code{pymodeldata} in
+#' the ADM model table.
+#'
+#' This function really is just a convencience wrapper around
+#' \code{getScoringModelFromJSONFactoryString}. It first decodes the data
+#' then delegates to that function.
+#'
+#' @param modelSnapshot The encoded model snapshot string from the model table.
+#' @param name Optional name to be used in the generated PMML. Will be used in
+#'   the header of the PMML.
+#'
+#' @return A 4-element \code{list} with the human-readable scorecard in
+#'   $scorecard as a \code{data.table}, a human-readable mapping of the score to
+#'   a propensity in $mapping, also as a \code{data.table}, an executable PMML
+#'   in $pmml in the form of a string and additional the full internal binning.
+#' @export
+getScorecardFromSnapshot <- function(modelSnapshot, name="")
+{
+  modelDataJSON <- memDecompress(base64enc::base64decode(modelSnapshot), type = "gzip", asChar = T)
+
+  getScoringModelFromJSONFactoryString(modelDataJSON, name, isAuditModel = T)
+}
+
+
+# TODO: below is just an internal experiment to see if we can get the
+# parameters for the NB models as well. That doesnt seem to be the case
+# currently (Pega 8.6). See discussions in techdocs somewhere.
+# Also see https://agilestudio.pega.com/prweb/AgileStudio/app/agilestudio/story/US-415172
+# for the versioning of the model data.
+getModelParamsFromSnapshot <- function(modelSnapshot)
+{
+  modelSnapshotFile <- "tests/testthat/d/encodedmodelsnapshot.txt"
+  modelSnapshot <- paste(readLines(modelSnapshotFile), collapse="\n")
+  modelDataJSON <- memDecompress(base64enc::base64decode(modelSnapshot), type = "gzip", asChar = T)
+
+  xxx<-jsonlite::fromJSON(modelDataJSON)
+
+  # NB most meta params are missing!
+
+  yyy <- xxx[sapply(xxx, is.atomic)]
+  zzz <- yyy[sapply(yyy, length) == 1]
+
+  as.data.frame(zzz)
+}
+
+
+normalizedBinningFromSingleJSONFactoryString <- function(aFactory, id, overallModelName, tmpFolder=NULL, forceLowerCasePredictorNames=F, activePredsOnly=T)
 {
   model <- fromJSON(aFactory)
 
@@ -286,7 +350,7 @@ createListFromSingleJSONFactoryString <- function(aFactory, id, overallModelName
     sink()
   }
 
-  predBinningTable <- internalBinningFromJSONFactory(model$analyzedData, id, activePredsOnly)
+  predBinningTable <- normalizedBinningFromJSONFactory(model$analyzedData, id, activePredsOnly)
 
   if (forceLowerCasePredictorNames) {
     predBinningTable[, PredictorName := tolower(PredictorName)]
@@ -313,11 +377,11 @@ createListFromSingleJSONFactoryString <- function(aFactory, id, overallModelName
               "binning"=predBinningTable))
 }
 
-createListFromADMFactory <- function(partitions, overallModelName, tmpFolder=NULL, forceLowerCasePredictorNames=F)
+normalizedBinningFromADMFactory <- function(partitions, overallModelName, tmpFolder=NULL, forceLowerCasePredictorNames=F)
 {
   modelList <- lapply(partitions$pymodelpartitionid,
                       function(x) {
-                        return(createListFromSingleJSONFactoryString(partitions$pyfactory[which(partitions$pymodelpartitionid==x)],
+                        return(normalizedBinningFromSingleJSONFactoryString(partitions$pyfactory[which(partitions$pymodelpartitionid==x)],
                                                                      x,
                                                                      overallModelName,
                                                                      tmpFolder,
@@ -342,7 +406,7 @@ createListFromADMFactory <- function(partitions, overallModelName, tmpFolder=NUL
 #' binning <- admJSONFactoryToBinning(admFactory$pyfactory[1])}
 admJSONFactoryToBinning <- function(factoryJSON, modelname="Dummy")
 {
-  factoryDetail <- createListFromSingleJSONFactoryString(factoryJSON,
+  factoryDetail <- normalizedBinningFromSingleJSONFactoryString(factoryJSON,
                                                          id=modelname,
                                                          overallModelName=modelname,
                                                          tmpFolder=NULL,

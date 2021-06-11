@@ -73,7 +73,7 @@ test_that("model export with JSON names", {
 test_that("specialized predictor data export", {
   data <- readADMDatamartPredictorExport(instancename="Data-Decision-ADM-PredictorBinningSnapshot_All",
                                          srcFolder="dsexports")
-  expect_equal(nrow(data), 15) # binning skipped by default
+  expect_equal(nrow(data), 425) # binning skipped by default
   expect_equal(ncol(data), 15) # omits internal and binning fields
   expect_identical(sort(names(data)),
                    c("BinType", "Contents", "EntryType", "ModelID", "Negatives",
@@ -112,9 +112,48 @@ test_that("specialized predictor data export", {
   data <- readADMDatamartPredictorExport(instancename="Data-Decision-ADM-PredictorBinningSnapshot_All",
                                          srcFolder="dsexports",
                                          noBinning = F)
-  expect_equal(nrow(data), 15) # binning but only latest snapshots
+  expect_equal(nrow(data), 1755) # binning but only latest snapshots
   expect_equal(ncol(data), 30) # omits internal fields
 })
+
+# test_that("Multi-line JSON files", {
+#
+#   # Models
+#
+#   zipFile <- "../../../data/Data-Decision-ADM-ModelSnapshot_pyModelSnapshots_20210526T131808_GMT.zip"
+#   jsonFile <- "data.json"
+#   if(file.exists(jsonFile)) file.remove(jsonFile)
+#   utils::unzip(zipFile, exdir=".")
+#
+#   data <- readDSExport(jsonFile)
+#   expect_equal(nrow(data), 1047)
+#   expect_equal(ncol(data), 27)
+#
+#   data <- readADMDatamartModelExport(jsonFile)
+#   expect_equal(nrow(data), 1047)
+#   expect_equal(ncol(data), 27)
+#
+#   if(file.exists(jsonFile)) file.remove(jsonFile)
+#   expect_error( readDSExport(jsonFile))
+#
+#   # Predictor binning
+#
+#   zipFile <- "../../../data/Data-Decision-ADM-PredictorBinningSnapshot_pyADMPredictorSnapshots_20210526T133622_GMT.zip"
+#   jsonFile <- "data.json"
+#   if(file.exists(jsonFile)) file.remove(jsonFile)
+#   utils::unzip(zipFile, exdir=".")
+#
+#   data <- readDSExport(jsonFile)
+#   expect_equal(nrow(data), 70735)
+#   expect_equal(ncol(data), 36)
+#
+#   data <- readADMDatamartPredictorExport(jsonFile, latestOnly = F, noBinning = F)
+#
+#   expect_equal(nrow(data), 70735)
+#   expect_equal(ncol(data), 36)
+#
+#   # if(file.exists(jsonFile)) file.remove(jsonFile)
+# })
 
 test_that("AUC from binning", {
   expect_equal(auc_from_bincounts( c(3,1,0), c(2,0,1)), 0.75)

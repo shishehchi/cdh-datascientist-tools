@@ -1,10 +1,12 @@
-pandoc: 2.11.2
+pandoc: 2.11.4
 pkgdown: 1.6.1
 pkgdown_sha: ~
 articles:
   adhoc-datasetanalysis: adhoc-datasetanalysis.html
   adm-datamart: adm-datamart.html
   adm-explained: adm-explained.html
+  historical-dataset: historical-dataset.html
   ih-reporting: ih-reporting.html
-last_built: 2020-12-18T13:55Z
+  snapshots-to-scorecards: snapshots-to-scorecards.html
+last_built: 2021-06-09T14:34Z
 

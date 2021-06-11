@@ -59,66 +59,45 @@ applyUniformPegaFieldCasing <- function(dt)
   setnames(dt, fields)
 }
 
-# Drop internal fields, fix types and more
-standardizeDatamartModelData <- function(dt, latestOnly)
+
+#' Efficient read of newline-delimited JSON (NDJSON) (aka line-delimited JSON (LDJSON),
+#' JSON lines (JSONL), multi-line JSON), a common format for big data streaming.
+#'
+#' @param jsonFiles Either a single file with the JSON data, a folder that
+#'   we read the
+#' @param acceptJSONLines Optional filter function. If given, this is applied
+#'   to the lines with JSON data and only those lines for which the function
+#'   returns TRUE will be parsed. This is just for efficiency when reading
+#'   really big files so you can filter rows early. This would most typically
+#'   be used internally when called from \code{readDSExport} and related.
+#' @param dropColumns Optional list if columns that will be dropped. Dropping
+#'   will happen after converting (batches of) data to \code{data.table}.
+#'
+#' @return A \code{data.table} with the contents
+#' @export
+#'
+#' @examples
+#' \dontrun{readNDJSON("datamart.json")}
+readNDJSON <- function(jsonFiles, acceptJSONLines=NULL, dropColumns=c())
 {
-  # drop internal fields
-  dt[, names(dt)[grepl("^p[x|z]", names(dt))] := NULL]
+  # Efficient read of newline-delimited JSON (NDJSON) (aka line-delimited JSON (LDJSON),
+  # JSON lines (JSONL), multi-line JSON), a common format for big data streaming.
 
-  # standardized camel casing of fields
-  applyUniformPegaFieldCasing(dt)
+  # jsonFiles
+  # - a single file
+  # - a folder in which case we pick up all the json files from it
+  # - a zip file then we read the json file(s) from it
+  # - a pattern that we pass to list.files
 
-  # filter to only take latest snapshot
-  if (latestOnly) {
-    dt <- dt[, .SD[which.max(SnapshotTime)], by=ModelID]
-  }
+  # returns a data.table
 
-  # some fields notoriously returned as char but are numeric
-  dt[, Performance := as.numeric(as.character(Performance))]
-  dt[, Positives := as.numeric(as.character(Positives))]
-  dt[, Negatives := as.numeric(as.character(Negatives))]
+  # reads large files in batches
 
-  # convert date/time fields if present and not already converted prior
-  if (is.factor(dt$SnapshotTime) || is.character(dt$SnapshotTime)) {
-    dt[, SnapshotTime := fromPRPCDateTime(SnapshotTime)]
-  }
-  if ("FactoryUpdateTime" %in% names(dt)) {
-    if (is.factor(dt$FactoryUpdateTime) || is.character(dt$FactoryUpdateTime)) {
-      dt[, FactoryUpdateTime := fromPRPCDateTime(FactoryUpdateTime)]
-    }
-  }
+  # applies row filtering using the provided accept function
+  # applies column filtering after converting to data.table using the dropColumns
 
-  return(dt)
 }
 
-# If context of ADM models has been customized, additional context keys will
-# be represented as a JSON string in the pyName field. Here we try to detect
-# that and create proper fields instead of a JSON string.
-expandJSONContextInNameField <- function(dt)
-{
-  mapping <- data.table( OriginalName = levels(dt$Name) )
-  mapping[, isJSON := startsWith(OriginalName, "{") & endsWith(OriginalName, "}")]
-  if (!any(mapping$isJSON)) return(dt)
-
-  jsonFields <- rbindlist(lapply(mapping$OriginalName[mapping$isJSON], jsonlite::fromJSON, flatten=T), fill = T)
-  mapping[(isJSON), names(jsonFields) := jsonFields]
-  rbindlist(lapply(mapping$OriginalName[mapping$isJSON], jsonlite::fromJSON, flatten=T), fill = T)
-  mapping[, isJSON := NULL]
-  for (newName in names(mapping)) {
-    if (is.character(mapping[[newName]])) {
-      mapping[[newName]] <- factor(mapping[[newName]]) # retain as factors
-    }
-  }
-  applyUniformPegaFieldCasing(mapping) # apply uniform naming to new fields as well
-
-  dt <- merge(dt, mapping, by.x="Name", by.y="OriginalName")
-  if ("Name.y" %in% names(dt)) {
-    # use name from JSON strings but only if present there
-    dt[, Name := factor(ifelse(is.na(Name.y), as.character(Name), as.character(Name.y)))]
-    dt[, Name.y := NULL]
-  }
-  return(dt)
-}
 
 #' Read a Pega dataset export file.
 #'
@@ -130,8 +109,10 @@ expandJSONContextInNameField <- function(dt)
 #' a full file name to the export or to a JSON file that you unpacked yourself.
 #'
 #' @param instancename Name of the file w/o the timestamp, in Pega format
-#'   <Applies To>_<Instance Name>, or the complete filename including timestamp
-#'   and zip extension as exported from Pega.
+#'   <Applies To>_<Instance Name>, or the complete filename of the dataset
+#'   export file, or a specific JSON file. If none of these work it will try
+#'   to interpret the instancename as a pattern to \code{list.files} to match
+#'   multiple JSON files.
 #' @param srcFolder Optional folder to look for the file (defaults to the
 #'   current folder)
 #' @param tmpFolder Optional folder to store the unzipped data (defaults to a temp folder)
@@ -140,7 +121,7 @@ expandJSONContextInNameField <- function(dt)
 #' @param acceptJSONLines Optional filter function. If given, this is applied
 #'   to the lines with JSON data and only those lines for which the function
 #'   returns TRUE will be parsed. This is just for efficiency when reading
-#'   really big files so you can filter early.
+#'   really big files so you can filter rows early.
 #' @param stringsAsFactors Logical (default is FALSE). Convert all character columns to factors?
 #'
 #' @return A \code{data.table} with the contents
@@ -152,38 +133,65 @@ expandJSONContextInNameField <- function(dt)
 #' \dontrun{readDSExport("Data-Decision-ADM-ModelSnapshot_All_20180316T135038_GMT.zip",
 #' "~/Downloads")}
 #' \dontrun{readDSExport("~/Downloads/Data-Decision-ADM-ModelSnapshot_All_20180316T135038_GMT.zip")}
+#' \dontrun{readDSExport("SampleApp-SR_DecisionResults.json", "data")}
+#' \dontrun{readDSExport("json$", "create_hds/data")}
 readDSExport <- function(instancename, srcFolder=".", tmpFolder=tempdir(check = T), excludeComplexTypes=T, acceptJSONLines=NULL, stringsAsFactors=F)
 {
+  jsonFile <- NULL
+
   if(endsWith(instancename, ".json")) {
+    # See if it is a single, existing, JSON file
     if (file.exists(instancename)) {
       jsonFile <- instancename
       multiLineJSON <- readLines(jsonFile)
     } else if (file.exists(file.path(srcFolder,instancename))) {
-      jsonFile <- file.path(srcFolder,instancename)
-      multiLineJSON <- readLines(jsonFile)
-    } else {
-      stop("File not found (specified a JSON file)")
+        jsonFile <- file.path(srcFolder,instancename)
+        multiLineJSON <- readLines(jsonFile)
     }
   } else {
+    # See if it is a fully specified ZIP file then assume this is a Pega
+    # export with a "data.json" file inside.
+    zipFile <- instancename
+
     if(endsWith(instancename, ".zip")) {
       if (file.exists(instancename)) {
         zipFile <- instancename
       } else if (file.exists(file.path(srcFolder,instancename))) {
         zipFile <- file.path(srcFolder,instancename)
-      } else {
-        stop("File not found (specified a ZIP file)")
       }
     } else {
+
+      # See if it is just a base name of the instance, then find the most
+      # recent file by appending the date and "zip" extension according to
+      # the Pega dataset export conventions.
+
       zipFile <- paste(srcFolder,
                        rev(sort(list.files(path=srcFolder, pattern=paste("^", instancename, "_.*\\.zip$", sep=""))))[1],
                        sep="/")
-      if(!file.exists(zipFile)) stop(paste("File not found (looking for most recent file matching", instancename, "in", srcFolder, ")"))
     }
-    jsonFile <- file.path(tmpFolder,"data.json")
-    if(file.exists(jsonFile)) file.remove(jsonFile)
-    utils::unzip(zipFile, exdir=tmpFolder)
-    multiLineJSON <- readLines(jsonFile)
-    file.remove(jsonFile)
+
+    if (file.exists(zipFile)) {
+      jsonFile <- file.path(tmpFolder,"data.json")
+      if(file.exists(jsonFile)) file.remove(jsonFile)
+      utils::unzip(zipFile, exdir=tmpFolder)
+      if (!file.exists(jsonFile)) stop(paste("Expected Pega Dataset Export zipfile but",zipFile,"does not contain data.json"))
+      multiLineJSON <- readLines(jsonFile)
+      file.remove(jsonFile)
+    }
+  }
+
+  if (is.null(jsonFile)) {
+    # Try to interpret the filename as a pattern.
+    jsonFile <- list.files(pattern = instancename, path = srcFolder, full.names = T)
+    if (length(jsonFile) > 0) {
+      multiLineJSON <- unlist(sapply(jsonFile, readLines))
+    } else {
+      jsonFile <- NULL
+    }
+  }
+
+  if (is.null(jsonFile)) {
+    stop("File not found.")
   }
 
   if(!is.null(acceptJSONLines)) {
@@ -211,128 +219,6 @@ readDSExport <- function(instancename, srcFolder=".", tmpFolder=tempdir(check = 
   return(rbindlist(chunkList, use.names = T, fill = T))
 }
 
-# TODO provide similar func for IH data - even only for demo scenarios that strips off internal fields
-
-# TODO BinType probably does not belong in predictor data w/o bins
-
-#' Read export of ADM model data.
-#'
-#' This is a specialized version of \code{readDSExport}
-#' that defaults the dataset name, leaves out the detailed model data (if present) and
-#' other internal fields, returns the properties without the py prefixes and converts
-#' date fields, and makes sure numeric fields are returned as numerics.
-#'
-#' @param srcFolder Optional folder to look for the file (defaults to the
-#'   current folder)
-#' @param instancename Name of the file w/o the timestamp, in Pega format
-#'   <Applies To>_<Instance Name>, or the complete filename including timestamp
-#'   and zip extension as exported from Pega. Defaults to the Pega generated
-#'   name of the dataset: \code{Data-Decision-ADM-ModelSnapshot_pyModelSnapshots}.
-#' @param latestOnly If TRUE only the most recent snapshot for every model
-#'   is read. Defaults to FALSE, so all model data over time is returned.
-#' @param tmpFolder Optional folder to store the unzipped data (defaults to a
-#' temp folder)
-#'
-#' @return A \code{data.table} with the ADM model data
-#' @export
-#'
-#' @examples
-#' \dontrun{readADMDatamartModelExport("~/Downloads")}
-readADMDatamartModelExport <- function(srcFolder=".",
-                                       instancename = "Data-Decision-ADM-ModelSnapshot_pyModelSnapshots",
-                                       latestOnly = F,
-                                       tmpFolder=tempdir(check = T))
-{
-  if (file.exists(srcFolder) & !dir.exists(srcFolder)) {
-    # if just one argument was passed and it happens to be an existing file, try use that
-    instancename = srcFolder
-    srcFolder = "."
-  }
-
-  modelz <- readDSExport(instancename, srcFolder, tmpFolder=tmpFolder, stringsAsFactors=T)
-  if ("pyModelData" %in% names(modelz)) {
-    modelz[,pyModelData := NULL]
-  }
-
-  modelz <- standardizeDatamartModelData(modelz, latestOnly=latestOnly)
-  modelz <- expandJSONContextInNameField(modelz)
-
-  return(modelz)
-}
-
-#' Read export of ADM predictor data.
-#'
-#' This is a specialized version of \code{readDSExport}
-#' that defaults the dataset name, leaves out internal fields and by default omits the
-#' predictor binning data. In addition it converts date fields and makes sure
-#' the returned fields have the correct type. All string values are returned
-#' as factors.
-#'
-#' @param srcFolder Optional folder to look for the file (defaults to the
-#'   current folder)
-#' @param instancename Name of the file w/o the timestamp, in Pega format
-#'   <Applies To>_<Instance Name>, or the complete filename including timestamp
-#'   and zip extension as exported from Pega. Defaults to the Pega generated
-#'   name of the dataset: \code{Data-Decision-ADM-PredictorBinningSnapshot_PredictorBinningSnapshot}.
-#' @param noBinning If TRUE (the default), skip reading the predictor binning data and just
-#'   return predictor level data. For a detailed view with all binning data, set
-#'   to FALSE.
-#' @param latestOnly If TRUE (the default) only the most recent snapshot for every model
-#'   is read. To return all data over time (if available), set to FALSE.
-#' @param tmpFolder Optional folder to store the unzipped data (defaults to a
-#' temp folder)
-#'
-#' @return A \code{data.table} with the ADM model data
-#' @export
-#'
-#' @examples
-#' \dontrun{readADMDatamartPredictorExport("~/Downloads")}
-readADMDatamartPredictorExport <- function(srcFolder=".",
-                                           instancename = "Data-Decision-ADM-PredictorBinningSnapshot_pyADMPredictorSnapshots",
-                                           noBinning = T,
-                                           latestOnly = T,
-                                           tmpFolder=tempdir(check = T))
-{
-  noBinningSkipFields <- c("pyBinSymbol","pyBinNegativesPercentage","pyBinPositivesPercentage",
-                           "pyBinNegatives", "pyBinPositives", "pyRelativeBinNegatives", "pyRelativeBinPositives",
-                           "pyBinResponseCount", "pyRelativeBinResponseCount", "pyBinResponseCountPercentage",
-                           "pyBinLowerBound", "pyBinUpperBound", "pyZRatio", "pyLift", "pyBinIndex")
-
-  if (noBinning) {
-    predz <- readDSExport(instancename, srcFolder, tmpFolder=tmpFolder,
-                          acceptJSONLines=function(linez) {
-                            # TODO make non fixed and a bit safer, allowing for
-                            # extra spaces and so on
-                            return(grepl('"pyBinIndex":1,', linez, fixed=T))
-                            },
-                          stringsAsFactors=T)
-    # just to be very defensive, double check there really are no other bins left
-    if (any(predz$pyBinIndex > 1)) {
-      predz <- predz[pyBinIndex = 1]
-    }
-    predz[, pyBinIndex := NULL]
-
-    predz[, intersect(names(predz), noBinningSkipFields) := NULL]
-  } else {
-    predz <- readDSExport(instancename, srcFolder, tmpFolder=tmpFolder)
-  }
-
-  predz[, names(predz)[grepl("^p[x|z]", names(predz))] := NULL]
-  applyUniformPegaFieldCasing(predz)
-  predz[, Performance := as.numeric(as.character(Performance))] # some fields notoriously returned as char but are numeric
-  predz[, Positives := as.numeric(as.character(Positives))]
-  predz[, Negatives := as.numeric(as.character(Negatives))]
-
-  predz[, SnapshotTime := fromPRPCDateTime(SnapshotTime)]
-
-  if (latestOnly) {
-    return(predz[, .SD[which.max(SnapshotTime)], by=ModelID])
-  } else {
-    return(predz)
-  }
-
-  return(predz)
-}
 
 #' Write table to a file in the format of the dataset export files.
 #'
@@ -497,76 +383,41 @@ toPRPCDateTime <- function(x)
   return(strftime(x, format="%Y%m%dT%H%M%OS3", tz="GMT", usetz=T))
 }
 
-# TODO below function is tricky and depends on names. It was used in the
-# modelreport.Rmd but possibly also internally.
-
-#' Helper function to return the actual and reported performance of ADM models.
+#' Subset the provided datamart data to just the latest snapshot per model.
 #'
-#' In the actual performance the actual score range of the model is
-#' taken into account, while for the stored (reported) performance that is not always the case. This function is mainly in support of validating
-#' a fix to the reported performance.
+#' If there is just one snapshot, nothing will change. It works for both
+#' model and predictor tables. If there is no snapshottime field, it will
+#' not do anything.
 #'
-#' @param dmModels A \code{data.table} with (possibly a subset of) the models exported from the ADM Datamart (\code{Data-Decision-ADM-ModelSnapshot}).
-#' @param dmPredictors A \code{data.table} with the predictors exported from the ADM Datamart (\code{Data-Decision-ADM-PredictorBinningSnapshot}).
-#' @param jsonPartitions A list with the (possibly subset) partitions data from the ADM Factory table
+#' @param dt The \code{data.table} with the datamart data.
 #'
-#' @return A \code{data.table} with model name, stored performance, actual performance, number of responses and the score range.
+#' @return A \code{data.table} with just the latest snapshots per model.
 #' @export
-getModelPerformanceOverview <- function(dmModels = NULL, dmPredictors = NULL, jsonPartitions = NULL)
+#'
+#' @examples
+#' latestSnapshotsOnly(admdatamart_binning)
+latestSnapshotsOnly <- function(dt)
 {
-  if (!is.null(dmModels) & !is.null(dmPredictors)) {
-    modelList <- createListFromDatamart(dmPredictors[ModelID %in% dmModels$ModelID],
-                                        fullName="Dummy",
-                                        modelsForPartition=dmModels)
-  } else if (!is.null(dmPredictors) & is.null(dmModels)) {
+  l <- function(grp, fld) { grp[grp[[fld]] == max(grp[[fld]])] }
 
-    modelList <- createListFromDatamart(dmPredictors, fullName="Dummy")
-    modelList[[1]][["context"]] <- list("Name" =  "Dummy") # should arguably be part of the createList but that breaks some tests, didnt want to bother
-  } else if (!is.null(jsonPartitions)) {
-    modelList <- createListFromADMFactory(jsonPartitions, overallModelName="Dummy")
+  snapshottimeField <- names(dt)[which(tolower(names(dt)) %in% c("snapshottime", "pysnapshottime"))[1]] # be careful with the names after all manipulation we do
+  if (!is.na(snapshottimeField)) {
+    return(dt[, l(.SD, snapshottimeField), by=ModelID])
   } else {
-    stop("Needs either datamart or JSON Factory specifications")
+    return(dt)
   }
+}
 
-  # Name, response count and reported performance obtained from the data directly. For the score min/max using the utility function
-  # that summarizes the predictor bins into a table ("ScaledBins") with the min and max weight per predictor. These weights are the
-  # normalized log odds and score min/max is found by adding them up.
+# robust version of which.max that can deal with NA's
+safe_which_max <- function(x)
+{
+  if (all(is.na(x))) return (length(x))
+  return (which.max(x))
+}
 
-  perfOverview <- data.table( name = sapply(modelList, function(m) {return(m$context$pyName)}),
-                              reported_performance = sapply(modelList, function(m) {return(m$binning$Performance[1])}),
-                              actual_performance = NA, # placeholder
-                              responses = sapply(modelList, function(m) {return(m$binning$TotalPos[1] + m$binning$TotalNeg[1])}),
-                              score_min = sapply(modelList, function(m) {scaled <- setBinWeights(copy(m$binning)); return(sum(scaled$binning[PredictorType != "CLASSIFIER"]$minWeight))}),
-                              score_max = sapply(modelList, function(m) {scaled <- setBinWeights(copy(m$binning)); return(sum(scaled$binning[PredictorType != "CLASSIFIER"]$maxWeight))}))
-
-
-  classifiers <- lapply(modelList, function(m) { return (m$binning[PredictorType == "CLASSIFIER"])})
-
-  findClassifierBin <- function( classifierBins, score )
-  {
-    if (nrow(classifierBins) == 1) {
-      return(-999)
-    }
-
-    return (1 + findInterval(score, classifierBins$BinUpperBound[1 : (nrow(classifierBins) - 1)]))
-  }
-
-  perfOverview$nbins <- sapply(classifiers, nrow)
-  perfOverview$actual_score_bin_min <- sapply(seq(nrow(perfOverview)),
-                                              function(n) { return( findClassifierBin( classifiers[[n]], perfOverview$score_min[n]))} )
-  perfOverview$actual_score_bin_max <- sapply(seq(nrow(perfOverview)),
-                                              function(n) { return( findClassifierBin( classifiers[[n]], perfOverview$score_max[n]))} )
-  perfOverview$actual_performance <- sapply(seq(nrow(perfOverview)),
-                                           function(n) { return( auc_from_bincounts(
-                                             classifiers[[n]]$BinPos[perfOverview$actual_score_bin_min[n]:perfOverview$actual_score_bin_max[n]],
-                                             classifiers[[n]]$BinNeg[perfOverview$actual_score_bin_min[n]:perfOverview$actual_score_bin_max[n]] )) })
-  # print(perfOverview)
-  # print(sapply(perfOverview, class))
-  # print(modelList)
-  # stop("Booh")
-  setorder(perfOverview, name)
-
-
-  return(perfOverview)
+safe_is_max <- function(x)
+{
+  if (all(is.na(x))) return (rep(T,length(x)))
+  return (x == max(x, na.rm=T))
 }
 

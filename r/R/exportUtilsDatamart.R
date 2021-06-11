@@ -36,6 +36,8 @@ getDMModelContextAsString <- function(partition)
 #' because the snapshot agent will also snapshot all models wholesale. If and when that becomes more granular, we may
 #' need to make this more subtle, so take the latest after grouping by pyconfigurationname, pyappliestoclass, pxapplication.
 #' @param verbose Set to \code{TRUE} to show database queries.
+#' @param includeModelData Include the "blob" with serialized model data. The data will not be unpacked but just
+#' be there as a large string. Default is \code{FALSE}.
 #'
 #' @return A \code{data.table} with the ADM model details. The names are
 #' CamelCased in a standard way so processing of the results is not dependent
@@ -45,15 +47,21 @@ getDMModelContextAsString <- function(partition)
 #' @examples
 #' \dontrun{models <- readADMDatamartModelTable(conn)}
 #' \dontrun{allModels <- readADMDatamartModelTable(conn, latestOnly = F)}
-readADMDatamartModelTable <- function(conn, appliesToFilter=NULL, ruleNameFilter=NULL, applicationFilter=NULL, latestOnly = F, verbose=F)
+readADMDatamartModelTable <- function(conn, appliesToFilter=NULL, ruleNameFilter=NULL, applicationFilter=NULL, latestOnly = F, verbose=F,
+                                      includeModelData = F)
 {
   # Drop Pega internal fields and model data (if present - not all releases have that)
-  query <- paste("select * from", DATAMART_MODELTABLE, "where false")
+  # Also drop large "pymodeldata" always - TODO perhaps make this a flag (includeModelData)
+  query <- paste("select * from", DATAMART_MODELTABLE, "where 1=2")
   if(verbose) {
     print(query)
   }
   fields <- names(dbGetQuery(conn, query))
-  fields <- setdiff(fields[!grepl("^p[x|z]", fields)], "pymodeldata")
+  if (includeModelData) {
+    fields <- fields[!grepl("^p[x|z]", fields, ignore.case = T)]
+  } else {
+    fields <- fields[!grepl("^((p[x|z])|pymodeldata)", fields, ignore.case = T)]
+  }
 
   wheres <- list()
   if(!is.null(appliesToFilter)) {
@@ -67,6 +75,9 @@ readADMDatamartModelTable <- function(conn, appliesToFilter=NULL, ruleNameFilter
   }
 
   if (latestOnly) {
+    # Currently only batching when fetching all snapshots as this makes the table really large. However in
+    # principle the same logic could be applied here. Note also that max(pysnapshottime) is the overall max
+    # and not per model ID.
     batchConditions <- paste("pysnapshottime IN (select max(pysnapshottime) from", DATAMART_MODELTABLE, ")")
   } else {
     query <- paste("select pymodelid, count(*) as nsnapshots from", DATAMART_MODELTABLE,
@@ -124,12 +135,12 @@ readADMDatamartModelTable <- function(conn, appliesToFilter=NULL, ruleNameFilter
 readADMDatamartPredictorTable <- function(conn, ModelIDs = NULL, latestOnly=T, verbose=T)
 {
   # Drop Pega internal fields
-  query <- paste("select * from", DATAMART_PREDICTORTABLE, "where false")
+  query <- paste("select * from", DATAMART_PREDICTORTABLE, "where 1=2")
   if(verbose) {
     print(query)
   }
   fields <- names(dbGetQuery(conn, query))
-  fields <- fields[!grepl("^p[x|z]", fields)]
+  fields <- fields[!grepl("^p[x|z]", fields, ignore.case = T)]
 
   # TODO implement some sort of batching
 
@@ -235,7 +246,9 @@ getBinTypeFromDatamart <- function(dmbin)
 # and add missing information like Smoothing factor etc.
 getPredictorDataFromDatamart <- function(dmbinning, id, overallModelName, tmpFolder=NULL)
 {
-  dmbinning <- dmbinning[which(SnapshotTime == max(SnapshotTime) & (EntryType == "Active" | EntryType == "Classifier"))]
+  dmbinning <- dmbinning[(safe_is_max(SnapshotTime) & (EntryType == "Active" | EntryType == "Classifier"))]
+
+  if (nrow(dmbinning) == 0) return(NULL) # defensive coding, but we have seen binnings without any active and/or classifier rows
 
   # explicit mapping so we can set types as well as do some value mapping
   binning <- data.table( ModelID = dmbinning$ModelID,
@@ -354,32 +367,39 @@ getPredictorDataFromDatamart <- function(dmbinning, id, overallModelName, tmpFol
   return(predBinningTable)
 }
 
-createListFromDatamart <- function(predictorsForPartition,
-                                   fullName,
-                                   tmpFolder=NULL,
-                                   modelsForPartition=NULL,
-                                   useLowercaseContextKeys=FALSE)
+normalizedBinningFromDatamart <- function(predictorsForPartition,
+                                          fullName="",
+                                          tmpFolder=NULL,
+                                          modelsForPartition=NULL,
+                                          useLowercaseContextKeys=FALSE)
 {
   predictorsForPartition <- data.table(predictorsForPartition) # just to be sure
 
   if (!is.null(modelsForPartition)) {
     modelsForPartition <- as.data.table(modelsForPartition)
 
-    modelsForPartition <- modelsForPartition[SnapshotTime == max(SnapshotTime),] # max works because the way Pega date strings are represented
+    modelsForPartition <- modelsForPartition[safe_is_max(SnapshotTime),] # max works because the way Pega date strings are represented
 
-    modelsForPartition[["contextAsString"]] <- sapply(modelsForPartition$ModelID, function(x)
-    { return(getDMModelContextAsString(getContextKeyValuesFromDatamart(modelsForPartition[ModelID==x,]))) })
+    modelsForPartition[["contextAsString"]] <-
+      sapply(modelsForPartition$ModelID,
+             function(x) { return(getDMModelContextAsString(getContextKeyValuesFromDatamart(modelsForPartition[ModelID==x,]))) })
 
-    modelList <- lapply(modelsForPartition$ModelID,
-                        function(x){list("binning" = getPredictorDataFromDatamart(predictorsForPartition[ModelID==x,],
+    modelList <-
+      lapply(modelsForPartition$ModelID,
+             function(x){list("binning" = getPredictorDataFromDatamart(predictorsForPartition[ModelID==x,],
+                                                                       modelsForPartition[ModelID==x,]$contextAsString,
+                                                                       fullName, tmpFolder),
+                              "context" = getContextKeyValuesFromDatamart(modelsForPartition[ModelID==x,],
+                                                                          useLowercaseContextKeys=useLowercaseContextKeys))})
 
-                                                                                  modelsForPartition[ModelID==x,]$contextAsString,
-                                                                                  fullName, tmpFolder),
-                                         "context" = getContextKeyValuesFromDatamart(modelsForPartition[ModelID==x,],
-                                                                                     useLowercaseContextKeys=useLowercaseContextKeys))})
     names(modelList) <- modelsForPartition$ModelID
+
+    # remove the elements w/o any binning at all
+    modelList <- modelList[sapply(modelList, function(x) {return(!is.null(x$binning) & !is.null(x$context))})]
+
   } else {
-    modelList <- list(list("binning"=getPredictorDataFromDatamart(predictorsForPartition, "allbinning", fullName, tmpFolder)))
+    modelList <- list(list("binning"=getPredictorDataFromDatamart(predictorsForPartition,
+                                                                  "allbinning", fullName, tmpFolder)))
     names(modelList) <- fullName
   }
 
