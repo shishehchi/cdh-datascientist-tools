@@ -406,7 +406,7 @@ class ADMReport(ModelReport):
     def __init__(self, modelID, issue, group, channel, direction, modelName, 
                  positives, responses, performance, snapshot, predModelID, predName, 
                  predPerformance, binSymbol, binIndex, entryType, predictorType, 
-                 predSnapshot, binPositives, binResponses):
+                 predSnapshot, binPositives, binResponses, binPositivePer, binNegativePer, binResponseCountPer):
         """ Constructor of class ADMReport
         All the inout data to instantiate the class must be numpy arrays.
         If ADM data is obtained in csv format, each input array for this class is the corresponding
