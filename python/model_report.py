@@ -449,7 +449,7 @@ class ADMReport(ModelReport):
         self.binResponseCountPer = binResponseCountPer
         self._check_pred_data_shape()
         self.predCols = ['model ID', 'predictor name', 'predictor performance', 'bin symbol', 'bin index', 'entry type',
-                         'predictor type', 'bin positives', 'bin responses', 'bin positive perccentage', 
+                         'predictor type', 'bin positives', 'bin responses', 'bin positive percentage', 
                          'bin negative percentage', 'bin response count percentage', 'predictor snapshot']
         self.latestPredModel = self._create_pred_model_df()
 
@@ -621,7 +621,7 @@ class ADMReport(ModelReport):
         _df = self._apply_query(query, _df_g).reset_index(drop=True)
         if modelID:
             _df = _df[_df['Model ID']==modelID].reset_index(drop=True)
-        _df['absIc'] = np.abs(_df['bin positive perccentage'] - _df['bin negative perccentage'])
+        _df['absIc'] = np.abs(_df['bin positive percentage'] - _df['bin negative percentage'])
         _df = _df.groupby(['Model ID', 'predictor name']).apply(ImpactInfluence).reset_index().merge(
             latestPredModel[['Model ID', 'issue', 'group', 'channel', 'direction', 'name']].drop_duplicates(), on='Model ID')
         return _df
