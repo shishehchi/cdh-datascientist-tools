@@ -613,7 +613,7 @@ class ADMReport(ModelReport):
         d = {}
         d['Impact(%)'] = X['absIc'].max()
         d['Influence(%)'] = (X['pyBinResponseCountPercentage']*X['absIc']/100).sum()
-        return pd.Series(d))
+        return pd.Series(d)
     
 
     def calculate_impact_influence(self, modelID=None, query={}):
